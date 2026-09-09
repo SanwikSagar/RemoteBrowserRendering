@@ -270,27 +270,32 @@ class RemoteBrowserClient {
   }
 
   renderFrame(data) {
-    // Update image
-    this.elements.stream.src = `data:image/jpeg;base64,${data.frame}`;
+    // Preload image before displaying for smoother rendering
+    const img = new Image();
+    img.onload = () => {
+      this.elements.stream.src = img.src;
+      
+      // Update frame count
+      this.frameCount++;
+      this.fpsCounter++;
+      this.elements.frameCountEl.textContent = this.frameCount;
+
+      // Calculate FPS
+      const now = Date.now();
+      const elapsed = now - this.lastFpsUpdate;
+      if (elapsed >= 1000) {
+        const fps = Math.round((this.fpsCounter / elapsed) * 1000);
+        this.elements.currentFps.textContent = fps;
+        this.fpsCounter = 0;
+        this.lastFpsUpdate = now;
+      }
+
+      // Calculate latency
+      const latency = Date.now() - data.timestamp;
+      this.elements.latency.textContent = `${latency}ms`;
+    };
     
-    // Update frame count
-    this.frameCount++;
-    this.fpsCounter++;
-    this.elements.frameCountEl.textContent = this.frameCount;
-
-    // Calculate FPS
-    const now = Date.now();
-    const elapsed = now - this.lastFpsUpdate;
-    if (elapsed >= 1000) {
-      const fps = Math.round((this.fpsCounter / elapsed) * 1000);
-      this.elements.currentFps.textContent = fps;
-      this.fpsCounter = 0;
-      this.lastFpsUpdate = now;
-    }
-
-    // Calculate latency
-    const latency = Date.now() - data.timestamp;
-    this.elements.latency.textContent = `${latency}ms`;
+    img.src = `data:image/jpeg;base64,${data.frame}`;
   }
 
   startStream() {

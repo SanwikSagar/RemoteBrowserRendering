@@ -11,7 +11,7 @@ export class StreamManager {
     const sessionId = randomUUID();
     const fps = Math.min(options.fps || 30, 30); // Cap at 30 FPS for free tier
     const frameInterval = 1000 / fps;
-    const quality = Math.min(Math.max(options.quality || 70, 50), 85); // Lower quality for speed
+    const quality = Math.min(Math.max(options.quality || 65, 50), 85); // Even lower for speed
     const width = options.width || 1280;  // Lower resolution for free tier
     const height = options.height || 720; // Lower resolution for free tier
 
@@ -28,16 +28,26 @@ export class StreamManager {
       deviceScaleFactor: 1
     });
 
-    // Aggressive optimization for performance
+    // Ultra-aggressive optimization for maximum performance
     await page.setRequestInterception(true);
     page.on('request', (request) => {
       const resourceType = request.resourceType();
-      // Block heavy resources for faster loading
-      if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
-        // Allow first-party images only
-        if (resourceType === 'image' && request.url().startsWith(url)) {
-          request.continue();
-        } else {
+      const requestUrl = request.url();
+      
+      // Block all non-essential resources for fastest loading
+      if (['media', 'font', 'stylesheet', 'image'].includes(resourceType)) {
+        request.abort();
+      } else if (resourceType === 'script') {
+        // Only allow same-origin scripts
+        try {
+          const pageOrigin = new URL(url).origin;
+          const scriptOrigin = new URL(requestUrl).origin;
+          if (pageOrigin === scriptOrigin) {
+            request.continue();
+          } else {
+            request.abort();
+          }
+        } catch {
           request.abort();
         }
       } else {
@@ -91,7 +101,7 @@ export class StreamManager {
           })
           .toBuffer();
 
-        // Send frame via WebSocket
+        // Send frame via WebSocket (optimized base64)
         if (ws.readyState === 1) { // OPEN
           const frameData = {
             type: 'frame',
@@ -194,16 +204,16 @@ export class StreamManager {
 
         case 'navigate':
           if (action.action === 'back') {
-            await page.goBack({ waitUntil: 'networkidle2' });
+            await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
             console.log('⬅️ Navigate back');
           } else if (action.action === 'forward') {
-            await page.goForward({ waitUntil: 'networkidle2' });
+            await page.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 });
             console.log('➡️ Navigate forward');
           } else if (action.action === 'reload') {
-            await page.reload({ waitUntil: 'networkidle2' });
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
             console.log('🔄 Reload page');
           } else if (action.action === 'goto' && action.url) {
-            await page.goto(action.url, { waitUntil: 'networkidle2', timeout: 30000 });
+            await page.goto(action.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
             console.log(`🧭 Navigate to: ${action.url}`);
           }
           

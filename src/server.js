@@ -68,6 +68,10 @@ const browserPool = new BrowserPool({
       '--disable-new-content-rendering-timeout',
       '--disable-image-animation-resync',
       '--run-all-compositor-stages-before-draw',
+      '--disable-partial-raster',
+      '--disable-skia-runtime-opts',
+      '--disable-smooth-scrolling',
+      '--disable-frame-rate-limit',
       
       // Network optimizations  
       '--disable-domain-reliability',
@@ -99,8 +103,25 @@ const server = app.listen(PORT, () => {
   console.log(`📺 Open http://localhost:${PORT} to view the client`);
 });
 
-// WebSocket server for streaming
-const wss = new WebSocketServer({ server });
+// WebSocket server for streaming with compression enabled
+const wss = new WebSocketServer({ 
+  server,
+  perMessageDeflate: {
+    zlibDeflateOptions: {
+      chunkSize: 1024,
+      memLevel: 7,
+      level: 3 // Fast compression
+    },
+    zlibInflateOptions: {
+      chunkSize: 10 * 1024
+    },
+    clientNoContextTakeover: true,
+    serverNoContextTakeover: true,
+    serverMaxWindowBits: 10,
+    concurrencyLimit: 10,
+    threshold: 1024 // Only compress messages > 1KB
+  }
+});
 const streamManager = new StreamManager(browserPool);
 
 wss.on('connection', (ws) => {
