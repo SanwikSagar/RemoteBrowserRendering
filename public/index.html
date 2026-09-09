@@ -16,6 +16,10 @@
             background: #202124;
             min-height: 100vh;
             overflow: hidden;
+            /* GPU acceleration for smooth performance */
+            transform: translateZ(0);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
 
         .browser-window {
@@ -24,6 +28,8 @@
             height: 100vh;
             width: 100vw;
             background: #ffffff;
+            position: relative;
+            overflow: hidden;
         }
 
         /* Window Controls */
@@ -133,6 +139,8 @@
             padding: 8px 12px;
             background: #ffffff;
             border-bottom: 1px solid #dadce0;
+            position: relative;
+            z-index: 10;
         }
 
         .nav-btn {
@@ -146,11 +154,16 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            transition: background 0.15s;
+            transition: background 0.15s ease, transform 0.1s ease;
+            position: relative;
         }
 
         .nav-btn:hover:not(:disabled) {
             background: #f1f3f4;
+        }
+
+        .nav-btn:active:not(:disabled) {
+            transform: scale(0.95);
         }
 
         .nav-btn:disabled {
@@ -219,15 +232,38 @@
             right: 0;
             background: #ffffff;
             border-radius: 0 0 8px 8px;
-            max-height: 300px;
+            max-height: 400px;
             overflow-y: auto;
+            overflow-x: hidden;
             display: none;
-            z-index: 100;
+            z-index: 1000;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border: 1px solid #dadce0;
+            border-top: none;
+            margin-top: -1px;
+            scroll-behavior: smooth;
         }
 
         .suggestions.active {
             display: block;
+        }
+
+        .suggestions::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .suggestions::-webkit-scrollbar-track {
+            background: #f1f3f4;
+            border-radius: 0 0 8px 0;
+        }
+
+        .suggestions::-webkit-scrollbar-thumb {
+            background: #dadce0;
+            border-radius: 4px;
+        }
+
+        .suggestions::-webkit-scrollbar-thumb:hover {
+            background: #bdc1c6;
         }
 
         .suggestion-item {
@@ -236,8 +272,9 @@
             display: flex;
             align-items: center;
             gap: 8px;
-            transition: background 0.1s;
+            transition: background 0.1s ease;
             border-bottom: 1px solid #f1f3f4;
+            user-select: none;
         }
 
         .suggestion-item:last-child {
@@ -250,6 +287,10 @@
 
         .suggestion-item.active {
             background: #e8f0fe;
+        }
+
+        .suggestion-item:active {
+            background: #d2e3fc;
         }
 
         .suggestion-icon {
@@ -291,10 +332,16 @@
             align-items: center;
             justify-content: center;
             position: relative;
+            z-index: 100;
+            transition: background 0.15s ease, transform 0.1s ease;
         }
 
         .action-btn:hover {
             background: #f1f3f4;
+        }
+
+        .action-btn:active {
+            transform: scale(0.95);
         }
 
         .action-btn svg {
@@ -304,50 +351,98 @@
 
         /* Dropdown Menu */
         .dropdown-menu {
-            position: absolute;
-            top: 100%;
-            right: 0;
+            position: fixed;
+            top: auto;
+            right: 12px;
             margin-top: 4px;
             background: #ffffff;
             border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
-            min-width: 250px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+            border: 1px solid #dadce0;
+            min-width: 280px;
             padding: 8px 0;
             display: none;
-            z-index: 1000;
+            z-index: 10000;
+            max-height: 400px;
+            overflow-y: auto;
+            overflow-x: hidden;
         }
 
         .dropdown-menu.active {
             display: block;
         }
 
+        .dropdown-menu::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .dropdown-menu::-webkit-scrollbar-track {
+            background: #f1f3f4;
+            border-radius: 0 8px 8px 0;
+        }
+
+        .dropdown-menu::-webkit-scrollbar-thumb {
+            background: #dadce0;
+            border-radius: 4px;
+        }
+
+        .dropdown-menu::-webkit-scrollbar-thumb:hover {
+            background: #bdc1c6;
+        }
+
         .menu-item {
             display: flex;
             align-items: center;
             gap: 12px;
-            padding: 10px 16px;
+            padding: 12px 16px;
             font-size: 13px;
             color: #202124;
             cursor: pointer;
             transition: background 0.15s;
+            user-select: none;
         }
 
         .menu-item:hover {
             background: #f1f3f4;
         }
 
+        .menu-item.no-hover:hover {
+            background: transparent;
+            cursor: default;
+        }
+
         .menu-item svg {
             width: 16px;
             height: 16px;
             color: #5f6368;
+            flex-shrink: 0;
+        }
+
+        .menu-item-content {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .menu-item input[type="number"] {
-            width: 60px;
+            width: 70px;
             border: 1px solid #dadce0;
             border-radius: 4px;
-            padding: 4px 8px;
+            padding: 6px 10px;
             font-size: 13px;
+            outline: none;
+            transition: border-color 0.15s;
+            background: #ffffff;
+        }
+
+        .menu-item input[type="number"]:focus {
+            border-color: #1a73e8;
+            box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.1);
+        }
+
+        .menu-item input[type="number"]:hover {
+            border-color: #80868b;
         }
 
         .menu-separator {
@@ -362,6 +457,7 @@
             position: relative;
             background: #f8f9fa;
             overflow: hidden;
+            z-index: 1;
         }
 
         .loading-bar {
@@ -387,6 +483,9 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            /* GPU acceleration */
+            transform: translateZ(0);
+            will-change: transform;
         }
 
         #stream {
@@ -396,6 +495,13 @@
             height: auto;
             display: none;
             background: #ffffff;
+            /* GPU acceleration and optimization for smooth rendering */
+            transform: translateZ(0);
+            will-change: contents;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
+            backface-visibility: hidden;
+            -webkit-backface-visibility: hidden;
         }
 
         #stream.active {
@@ -570,14 +676,50 @@
 
         /* Responsive Design */
         @media (max-width: 768px) {
+            .window-controls {
+                height: 32px;
+            }
+
+            .tabs-bar {
+                height: 32px;
+                padding: 0 4px;
+            }
+
+            .tab {
+                min-width: 100px;
+                max-width: 180px;
+                padding: 0 12px;
+                height: 28px;
+                font-size: 12px;
+            }
+
             .nav-bar {
                 flex-wrap: wrap;
+                padding: 6px 8px;
+            }
+
+            .nav-btn {
+                width: 28px;
+                height: 28px;
+            }
+
+            .nav-btn svg {
+                width: 16px;
+                height: 16px;
             }
 
             .url-bar-container {
                 width: 100%;
                 order: 2;
                 margin: 4px 0 0 0;
+            }
+
+            .url-bar {
+                height: 36px;
+            }
+
+            .url-input {
+                font-size: 14px;
             }
 
             .placeholder {
@@ -590,6 +732,71 @@
 
             .placeholder p {
                 font-size: 13px;
+            }
+
+            .status-bar {
+                font-size: 10px;
+                padding: 4px 8px;
+            }
+
+            .status-right {
+                gap: 8px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .window-title {
+                font-size: 11px;
+            }
+
+            .tabs-bar {
+                display: none; /* Hide tabs on very small screens */
+            }
+
+            .nav-btn {
+                width: 24px;
+                height: 24px;
+            }
+
+            .nav-btn svg {
+                width: 14px;
+                height: 14px;
+            }
+
+            .url-bar {
+                height: 32px;
+                padding: 0 12px;
+            }
+
+            .url-input {
+                font-size: 13px;
+            }
+
+            .action-btn {
+                width: 28px;
+                height: 28px;
+            }
+
+            .placeholder-icon {
+                width: 60px;
+                height: 60px;
+            }
+
+            .placeholder h2 {
+                font-size: 18px;
+            }
+
+            .placeholder p {
+                font-size: 12px;
+            }
+
+            .status-left {
+                gap: 8px;
+            }
+
+            .status-right span:nth-child(2),
+            .status-right span:nth-child(4) {
+                display: none; /* Hide separators */
             }
         }
 
@@ -683,17 +890,23 @@
                             <span>Stop Streaming</span>
                         </div>
                         <div class="menu-separator"></div>
-                        <div class="menu-item">
+                        <div class="menu-item no-hover">
                             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                             </svg>
-                            <span>FPS: <input type="number" id="fpsInput" min="10" max="30" value="20"></span>
+                            <div class="menu-item-content">
+                                <span>FPS:</span>
+                                <input type="number" id="fpsInput" min="10" max="30" value="20" step="1">
+                            </div>
                         </div>
-                        <div class="menu-item">
+                        <div class="menu-item no-hover">
                             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
                             </svg>
-                            <span>Quality: <input type="number" id="qualityInput" min="50" max="90" value="65"></span>
+                            <div class="menu-item-content">
+                                <span>Quality:</span>
+                                <input type="number" id="qualityInput" min="50" max="90" value="65" step="5">
+                            </div>
                         </div>
                     </div>
                 </button>

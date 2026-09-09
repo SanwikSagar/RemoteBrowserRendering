@@ -11,6 +11,21 @@ class RemoteBrowserClient {
     this.reconnectDelay = 2000;
     this.connectionRetryTimeout = null;
     
+    // Performance optimizations - frame buffering for smooth display
+    this.frameQueue = [];
+    this.isProcessingFrame = false;
+    this.lastFrameTime = 0;
+    this.targetFrameTime = 1000 / 60; // 60 FPS target for smooth display
+    
+    // Responsive viewport - dynamic sizing based on window
+    this.viewportWidth = 1280;
+    this.viewportHeight = 720;
+    this.updateViewportSize();
+    
+    // Input debouncing for ultra-fast response
+    this.inputDebounceTimeout = null;
+    this.inputDebounceDelay = 50; // 50ms for instant feel
+    
     this.elements = {
       urlInput: document.getElementById('urlInput'),
       fpsInput: document.getElementById('fpsInput'),
@@ -43,8 +58,53 @@ class RemoteBrowserClient {
     };
 
     this.setupEventListeners();
+    this.setupResponsiveViewport();
     this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection');
     this.connect();
+  }
+
+  updateViewportSize() {
+    // Calculate optimal viewport based on window size
+    const navHeight = 120; // Approximate combined height of nav bars
+    const statusHeight = 28;
+    const availableWidth = window.innerWidth;
+    const availableHeight = window.innerHeight - navHeight - statusHeight;
+    
+    // Use 16:9 aspect ratio, fit within available space
+    const aspectRatio = 16 / 9;
+    let width = availableWidth;
+    let height = width / aspectRatio;
+    
+    if (height > availableHeight) {
+      height = availableHeight;
+      width = height * aspectRatio;
+    }
+    
+    // Ensure reasonable minimum and maximum sizes
+    width = Math.max(800, Math.min(width, 1920));
+    height = Math.round(width / aspectRatio);
+    
+    this.viewportWidth = Math.round(width);
+    this.viewportHeight = Math.round(height);
+    
+    console.log(`📐 Viewport size: ${this.viewportWidth}x${this.viewportHeight}`);
+  }
+
+  setupResponsiveViewport() {
+    // Update viewport on resize with debounce
+    let resizeTimeout;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimeout);
+      resizeTimeout = setTimeout(() => {
+        this.updateViewportSize();
+        // If streaming, restart with new size
+        if (this.isStreaming) {
+          console.log('📐 Window resized, restarting stream with new viewport...');
+          this.stopStream();
+          setTimeout(() => this.startStream(), 500);
+        }
+      }, 300);
+    });
   }
 
   setupEventListeners() {
@@ -63,25 +123,60 @@ class RemoteBrowserClient {
     this.elements.urlInput.addEventListener('focus', () => this.showSuggestions());
     this.elements.urlInput.addEventListener('blur', () => setTimeout(() => this.hideSuggestions(), 200));
 
-    // Settings menu
+    // Settings menu with proper positioning
     this.elements.settingsBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      this.elements.settingsMenu.classList.toggle('active');
+      const isActive = this.elements.settingsMenu.classList.contains('active');
+      
+      if (!isActive) {
+        // Position menu relative to button
+        const rect = this.elements.settingsBtn.getBoundingClientRect();
+        this.elements.settingsMenu.style.top = `${rect.bottom + 4}px`;
+        this.elements.settingsMenu.classList.add('active');
+      } else {
+        this.elements.settingsMenu.classList.remove('active');
+      }
     });
 
-    this.elements.startStreamOption.addEventListener('click', () => {
+    // Prevent menu from closing when clicking inside inputs
+    this.elements.settingsMenu.addEventListener('click', (e) => {
+      // Only stop propagation if clicking on inputs or no-hover items
+      if (e.target.tagName === 'INPUT' || e.target.closest('.no-hover')) {
+        e.stopPropagation();
+      }
+    });
+
+    this.elements.startStreamOption.addEventListener('click', (e) => {
+      e.stopPropagation();
       this.startStream();
       this.elements.settingsMenu.classList.remove('active');
     });
 
-    this.elements.stopStreamOption.addEventListener('click', () => {
+    this.elements.stopStreamOption.addEventListener('click', (e) => {
+      e.stopPropagation();
       this.stopStream();
       this.elements.settingsMenu.classList.remove('active');
     });
 
+    // Fast input handling with validation
+    this.elements.fpsInput.addEventListener('input', (e) => {
+      let value = parseInt(e.target.value);
+      if (value < 10) value = 10;
+      if (value > 30) value = 30;
+      e.target.value = value;
+    });
+
+    this.elements.qualityInput.addEventListener('input', (e) => {
+      let value = parseInt(e.target.value);
+      if (value < 50) value = 50;
+      if (value > 90) value = 90;
+      e.target.value = value;
+    });
+
     // Close menu when clicking outside
     document.addEventListener('click', (e) => {
-      if (!this.elements.settingsBtn.contains(e.target)) {
+      if (!this.elements.settingsBtn.contains(e.target) && 
+          !this.elements.settingsMenu.contains(e.target)) {
         this.elements.settingsMenu.classList.remove('active');
       }
     });
@@ -91,7 +186,7 @@ class RemoteBrowserClient {
     this.elements.stream.addEventListener('wheel', (e) => this.handleScroll(e), { passive: false });
     this.elements.stream.addEventListener('contextmenu', (e) => e.preventDefault());
     
-    // Keyboard events with debouncing
+    // Keyboard events
     document.addEventListener('keydown', (e) => this.handleKeyboard(e));
   }
 
@@ -103,8 +198,17 @@ class RemoteBrowserClient {
       return;
     }
 
+    // Clear previous timeout
+    if (this.inputDebounceTimeout) {
+      clearTimeout(this.inputDebounceTimeout);
+    }
+
+    // Show suggestions immediately but debounce the update
     this.showSuggestions();
-    this.updateSuggestions(value);
+    
+    this.inputDebounceTimeout = setTimeout(() => {
+      this.updateSuggestions(value);
+    }, this.inputDebounceDelay);
   }
 
   handleUrlKeydown(e) {
@@ -210,7 +314,10 @@ class RemoteBrowserClient {
     }
 
     items[nextIndex].classList.add('active');
-    items[nextIndex].scrollIntoView({ block: 'nearest' });
+    items[nextIndex].scrollIntoView({ 
+      block: 'nearest',
+      behavior: 'smooth'
+    });
   }
 
   showSuggestions() {
@@ -256,8 +363,8 @@ class RemoteBrowserClient {
     
     e.preventDefault();
     const rect = this.elements.stream.getBoundingClientRect();
-    const scaleX = 1280 / rect.width;
-    const scaleY = 720 / rect.height;
+    const scaleX = this.viewportWidth / rect.width;
+    const scaleY = this.viewportHeight / rect.height;
     
     const x = Math.round((e.clientX - rect.left) * scaleX);
     const y = Math.round((e.clientY - rect.top) * scaleY);
@@ -341,6 +448,8 @@ class RemoteBrowserClient {
     
     try {
       this.ws = new WebSocket(wsUrl);
+      // Enable binary type for better performance
+      this.ws.binaryType = 'arraybuffer';
     } catch (error) {
       console.error('Failed to create WebSocket:', error);
       this.handleConnectionFailure();
@@ -429,16 +538,8 @@ class RemoteBrowserClient {
         break;
 
       case 'frame':
-        this.renderFrame(data);
-        // Hide loading spinner on first frame and complete progress bar
-        if (this.frameCount === 0) {
-          this.hideLoadingSpinner();
-          this.updateProgressBar(100);
-          setTimeout(() => {
-            this.elements.loadingBar.classList.remove('active');
-          }, 300);
-          this.elements.stream.classList.add('active');
-        }
+        // Queue frame for smooth rendering
+        this.queueFrame(data);
         break;
 
       case 'pageInfo':
@@ -464,36 +565,122 @@ class RemoteBrowserClient {
     }
   }
 
+  queueFrame(data) {
+    // Memory optimization: Keep queue small (max 3 frames)
+    if (this.frameQueue.length >= 3) {
+      // Drop oldest frame to prevent memory buildup
+      this.frameQueue.shift();
+    }
+    
+    // Add frame to queue
+    this.frameQueue.push(data);
+    
+    // Start processing if not already processing
+    if (!this.isProcessingFrame) {
+      this.processNextFrame();
+    }
+  }
+
+  processNextFrame() {
+    if (this.frameQueue.length === 0) {
+      this.isProcessingFrame = false;
+      return;
+    }
+
+    this.isProcessingFrame = true;
+    const data = this.frameQueue.shift();
+    
+    // No need to skip frames - queue is already limited to 3
+
+    const now = performance.now();
+    const timeSinceLastFrame = now - this.lastFrameTime;
+    
+    // Render immediately if enough time has passed, otherwise schedule
+    if (timeSinceLastFrame >= this.targetFrameTime) {
+      this.renderFrame(data);
+      this.lastFrameTime = now;
+      // Process next frame
+      requestAnimationFrame(() => this.processNextFrame());
+    } else {
+      // Schedule for next frame
+      const delay = this.targetFrameTime - timeSinceLastFrame;
+      setTimeout(() => {
+        this.renderFrame(data);
+        this.lastFrameTime = performance.now();
+        requestAnimationFrame(() => this.processNextFrame());
+      }, delay);
+    }
+  }
+
   renderFrame(data) {
-    const img = new Image();
-    img.onload = () => {
-      this.elements.stream.src = img.src;
-      
-      // Update frame count
-      this.frameCount++;
-      this.fpsCounter++;
-      this.elements.frameCountEl.textContent = this.frameCount;
-
-      // Calculate FPS
-      const now = Date.now();
-      const elapsed = now - this.lastFpsUpdate;
-      if (elapsed >= 1000) {
-        const fps = Math.round((this.fpsCounter / elapsed) * 1000);
-        this.elements.fpsDisplay.textContent = `${fps} FPS`;
-        this.fpsCounter = 0;
-        this.lastFpsUpdate = now;
-      }
-
-      // Calculate latency
-      const latency = Date.now() - data.timestamp;
-      this.elements.latency.textContent = `${latency}ms`;
-    };
+    // Decode base64 more efficiently without intermediate strings
+    const byteCharacters = atob(data.frame);
+    const byteNumbers = new Uint8Array(byteCharacters.length);
     
-    img.onerror = () => {
-      console.error('Failed to load frame');
-    };
+    for (let i = 0; i < byteCharacters.length; i++) {
+      byteNumbers[i] = byteCharacters.charCodeAt(i);
+    }
     
-    img.src = `data:image/jpeg;base64,${data.frame}`;
+    const blob = new Blob([byteNumbers], { type: 'image/jpeg' });
+    const url = URL.createObjectURL(blob);
+    
+    // Clean up previous object URL IMMEDIATELY to free memory
+    const oldSrc = this.elements.stream.src;
+    if (oldSrc && oldSrc.startsWith('blob:')) {
+      URL.revokeObjectURL(oldSrc);
+    }
+    
+    this.elements.stream.src = url;
+    
+    // Clear the data to help garbage collection
+    byteNumbers.fill(0);
+    
+    // Update frame count
+    this.frameCount++;
+    this.fpsCounter++;
+    this.elements.frameCountEl.textContent = this.frameCount;
+
+    // Calculate FPS
+    const now = Date.now();
+    const elapsed = now - this.lastFpsUpdate;
+    if (elapsed >= 1000) {
+      const fps = Math.round((this.fpsCounter / elapsed) * 1000);
+      this.elements.fpsDisplay.textContent = `${fps} FPS`;
+      this.fpsCounter = 0;
+      this.lastFpsUpdate = now;
+    }
+
+    // Calculate latency
+    const latency = Date.now() - data.timestamp;
+    this.elements.latency.textContent = `${latency}ms`;
+
+    // Hide loading on first frame
+    if (this.frameCount === 1) {
+      this.hideLoadingSpinner();
+      this.updateProgressBar(100);
+      setTimeout(() => {
+        this.elements.loadingBar.classList.remove('active');
+      }, 300);
+      this.elements.stream.classList.add('active');
+    }
+    
+    // Force garbage collection hint every 100 frames
+    if (this.frameCount % 100 === 0) {
+      this.cleanupMemory();
+    }
+  }
+
+  cleanupMemory() {
+    // Clear frame queue if it's getting large
+    if (this.frameQueue.length > 5) {
+      console.log('🧹 Clearing frame queue to save memory');
+      this.frameQueue = this.frameQueue.slice(-2); // Keep only last 2
+    }
+    
+    // Suggest garbage collection (browser decides)
+    if (window.gc && typeof window.gc === 'function') {
+      window.gc();
+    }
   }
 
   startStream() {
@@ -512,29 +699,41 @@ class RemoteBrowserClient {
                      url.includes('.') ? `https://${url}` : 
                      url;
 
-    const fps = parseInt(this.elements.fpsInput.value) || 20;
-    const quality = parseInt(this.elements.qualityInput.value) || 65;
+    // Validate and clamp input values
+    let fps = parseInt(this.elements.fpsInput.value) || 20;
+    fps = Math.max(10, Math.min(fps, 30));
+    this.elements.fpsInput.value = fps;
+
+    let quality = parseInt(this.elements.qualityInput.value) || 65;
+    quality = Math.max(50, Math.min(quality, 90));
+    this.elements.qualityInput.value = quality;
 
     console.log(`🚀 Starting stream for ${finalUrl}`);
-    console.log(`⚙️  Settings: ${fps} FPS, ${quality}% quality`);
+    console.log(`⚙️  Settings: ${fps} FPS, ${quality}% quality, ${this.viewportWidth}x${this.viewportHeight}`);
 
-    this.ws.send(JSON.stringify({
-      type: 'start',
-      url: finalUrl,
-      fps,
-      quality,
-      width: 1280,
-      height: 720
-    }));
+    try {
+      this.ws.send(JSON.stringify({
+        type: 'start',
+        url: finalUrl,
+        fps,
+        quality,
+        width: this.viewportWidth,
+        height: this.viewportHeight
+      }));
 
-    this.frameCount = 0;
-    this.fpsCounter = 0;
-    this.lastFpsUpdate = Date.now();
-    
-    this.showLoadingSpinner(
-      'Starting browser...',
-      'Loading page, please wait'
-    );
+      this.frameCount = 0;
+      this.fpsCounter = 0;
+      this.lastFpsUpdate = Date.now();
+      this.frameQueue = [];
+      
+      this.showLoadingSpinner(
+        'Starting browser...',
+        'Loading page, please wait'
+      );
+    } catch (error) {
+      console.error('Failed to start stream:', error);
+      this.showNotification('Failed to start stream. Please try again.', 'error');
+    }
   }
 
   stopStream() {
@@ -545,13 +744,30 @@ class RemoteBrowserClient {
     console.log('🛑 Stopping stream');
     this.ws.send(JSON.stringify({ type: 'stop' }));
     this.hideLoadingSpinner();
+    this.frameQueue = [];
   }
 
   resetStream() {
     this.sessionId = null;
     this.isStreaming = false;
+    
+    // Clear frame queue and help GC
+    this.frameQueue.forEach(frame => {
+      if (frame && frame.frame) {
+        frame.frame = null; // Clear base64 data
+      }
+    });
+    this.frameQueue = [];
+    
     this.enableNavigation(false);
     this.elements.stream.classList.remove('active');
+    
+    // Clean up object URL and clear image
+    if (this.elements.stream.src && this.elements.stream.src.startsWith('blob:')) {
+      URL.revokeObjectURL(this.elements.stream.src);
+    }
+    this.elements.stream.src = '';
+    
     this.elements.placeholder.style.display = 'block';
     this.hideLoadingSpinner();
     this.updateStatus('connected', 'Connected');
@@ -561,6 +777,9 @@ class RemoteBrowserClient {
     this.frameCount = 0;
     this.elements.startStreamOption.style.display = 'flex';
     this.elements.stopStreamOption.style.display = 'none';
+    
+    // Force memory cleanup
+    this.cleanupMemory();
   }
 
   enableNavigation(enabled) {

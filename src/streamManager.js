@@ -12,6 +12,7 @@ export class StreamManager {
     const fps = Math.min(options.fps || 20, 30);
     const frameInterval = 1000 / fps;
     const quality = Math.min(Math.max(options.quality || 60, 50), 90);
+    // Use client-provided dimensions for responsive viewport
     const width = options.width || 1280;
     const height = options.height || 720;
 
@@ -49,7 +50,7 @@ export class StreamManager {
       });
       console.log('✅ Viewport set');
 
-      // Simple resource blocking
+      // Simple resource blocking for memory efficiency
       sendProgress(15, 'Configuring resources...', 'Blocking ads and trackers');
       await page.setRequestInterception(true);
       
@@ -57,12 +58,18 @@ export class StreamManager {
         const resourceType = request.resourceType();
         const requestUrl = request.url();
         
-        // Block only heavy resources
-        if (resourceType === 'media' || resourceType === 'font') {
+        // Aggressive blocking to save memory
+        if (resourceType === 'media' || 
+            resourceType === 'font' || 
+            resourceType === 'image' && requestUrl.includes('ads') ||
+            resourceType === 'stylesheet' && requestUrl.includes('analytics')) {
           request.abort().catch(() => {});
         } else if (requestUrl.includes('doubleclick') || 
                    requestUrl.includes('analytics') || 
-                   requestUrl.includes('ads')) {
+                   requestUrl.includes('ads') ||
+                   requestUrl.includes('tracking') ||
+                   requestUrl.includes('facebook.com/tr') ||
+                   requestUrl.includes('google-analytics')) {
           request.abort().catch(() => {});
         } else {
           request.continue().catch(() => {});
@@ -70,6 +77,29 @@ export class StreamManager {
       });
       
       console.log('✅ Request interception configured');
+
+      // Disable JavaScript features that consume memory
+      await page.evaluateOnNewDocument(() => {
+        // Disable service workers
+        delete window.navigator.serviceWorker;
+        
+        // Disable notifications
+        window.Notification = undefined;
+        
+        // Disable Web Workers
+        window.Worker = undefined;
+        window.SharedWorker = undefined;
+        
+        // Disable WebRTC
+        window.RTCPeerConnection = undefined;
+        window.webkitRTCPeerConnection = undefined;
+        window.mozRTCPeerConnection = undefined;
+        
+        // Disable IndexedDB
+        window.indexedDB = undefined;
+        
+        console.log('Memory optimizations applied');
+      });
 
       // Set user agent
       sendProgress(20, 'Setting user agent...', 'Preparing browser');
@@ -120,10 +150,15 @@ export class StreamManager {
       let frameCount = 0;
       let errorCount = 0;
       const maxErrors = 5;
+      let lastScreenshot = null; // Track for memory cleanup
 
       // Streaming loop
       const streamLoop = async () => {
-        if (!isStreaming) return;
+        if (!isStreaming) {
+          // Clean up on exit
+          lastScreenshot = null;
+          return;
+        }
 
         const startTime = Date.now();
 
@@ -132,6 +167,7 @@ export class StreamManager {
           if (page.isClosed()) {
             console.log(`Session ${sessionId} page closed`);
             isStreaming = false;
+            lastScreenshot = null;
             return;
           }
 
@@ -139,19 +175,34 @@ export class StreamManager {
           const screenshot = await page.screenshot({
             type: 'jpeg',
             quality,
-            encoding: 'binary'
+            encoding: 'binary',
+            optimizeForSpeed: true // Prioritize speed over size
           });
 
-          // Compress with Sharp - HIGH QUALITY compression
+          // Clear previous screenshot from memory
+          if (lastScreenshot) {
+            lastScreenshot = null;
+          }
+
+          // Compress with Sharp - HIGH QUALITY, FAST compression
           const optimizedJpeg = await sharp(screenshot)
+            .resize(width, height, {
+              fit: 'inside',
+              withoutEnlargement: true,
+              fastShrinkOnLoad: true // Performance boost
+            })
             .jpeg({ 
               quality,
               mozjpeg: true,
               chromaSubsampling: '4:4:4',  // Full chroma for quality
               trellisQuantisation: true,    // Better quality
-              overshootDeringing: true      // Reduce artifacts
+              overshootDeringing: true,     // Reduce artifacts
+              optimizeScans: true,          // Optimize progressive scans
+              quantisationTable: 3          // Use optimal quantisation
             })
             .toBuffer();
+
+          lastScreenshot = screenshot;
 
           // Send frame
           if (ws.readyState === 1) {
@@ -166,12 +217,21 @@ export class StreamManager {
             errorCount = 0; // Reset on success
           }
 
+          // Aggressive memory cleanup every 50 frames
+          if (frameCount % 50 === 0) {
+            if (global.gc) {
+              global.gc();
+            }
+          }
+
           // Schedule next frame
           const processingTime = Date.now() - startTime;
           const nextDelay = Math.max(10, frameInterval - processingTime);
 
           if (isStreaming) {
             setTimeout(streamLoop, nextDelay);
+          } else {
+            lastScreenshot = null;
           }
         } catch (error) {
           errorCount++;
@@ -179,6 +239,7 @@ export class StreamManager {
           if (error.message.includes('closed')) {
             console.log(`Session ${sessionId} closed`);
             isStreaming = false;
+            lastScreenshot = null;
             return;
           }
           
@@ -187,6 +248,7 @@ export class StreamManager {
           if (errorCount >= maxErrors) {
             console.error(`Too many errors, stopping stream ${sessionId}`);
             isStreaming = false;
+            lastScreenshot = null;
             if (ws.readyState === 1) {
               ws.send(JSON.stringify({
                 type: 'error',
