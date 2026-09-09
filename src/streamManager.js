@@ -9,11 +9,11 @@ export class StreamManager {
 
   async startStream(url, ws, options = {}) {
     const sessionId = randomUUID();
-    const fps = Math.min(options.fps || 60, 60); // Cap at 60 FPS
+    const fps = Math.min(options.fps || 30, 30); // Cap at 30 FPS for free tier
     const frameInterval = 1000 / fps;
-    const quality = Math.min(Math.max(options.quality || 80, 1), 100);
-    const width = options.width || 1920;
-    const height = options.height || 1080;
+    const quality = Math.min(Math.max(options.quality || 75, 50), 90); // Lower quality for free tier
+    const width = options.width || 1280;  // Lower resolution for free tier
+    const height = options.height || 720; // Lower resolution for free tier
 
     console.log(`📹 Starting stream session ${sessionId} for ${url}`);
     console.log(`⚙️  Settings: ${fps} FPS, ${quality}% quality, ${width}x${height}`);
