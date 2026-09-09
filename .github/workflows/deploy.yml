@@ -25,7 +25,7 @@ jobs:
         node-version: '22'  # Updated to Node 22 (Node 20 is deprecated)
 
     - name: Install dependencies
-      run: npm ci --omit=dev
+      run: npm install --production
 
     - name: Build documentation
       run: |

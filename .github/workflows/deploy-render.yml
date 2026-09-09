@@ -19,7 +19,7 @@ jobs:
       
       - name: Verify Build
         run: |
-          npm ci
+          npm install
           echo "✅ Dependencies installed successfully"
           echo "Render will auto-deploy from GitHub"
           echo "📦 Build ready for deployment"

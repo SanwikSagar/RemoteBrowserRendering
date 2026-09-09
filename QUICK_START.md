@@ -1,119 +1,111 @@
-# ⚡ Quick Start - Deploy in 5 Minutes
+# Quick Start Guide
 
-## 🎯 Step 1: Create GitHub Repository
-
-1. Go to https://github.com/new
-2. Repository name: `RemoteBrowserRendering`
-3. Make it **Public** (required for free tiers)
-4. Click "Create repository"
-5. **Copy the repository URL** (you'll need this)
-
-## 🚀 Step 2: Push Your Code
-
-Open terminal in your project folder and run:
+## Installation (2 minutes)
 
 ```bash
-# Initialize git (if not already done)
-git init
-git add .
-git commit -m "Deploy Remote Browser"
-git branch -M main
+# Clone repo
+git clone https://github.com/SanwikSagar/RemoteBrowserRendering.git
+cd RemoteBrowserRendering
 
-# Replace with YOUR repository URL from Step 1
-git remote add origin https://github.com/YOUR_USERNAME/RemoteBrowserRendering.git
-git push -u origin main
+# Install & start
+npm install
+npm start
+
+# Open browser
+# Go to http://localhost:3000
 ```
 
-## 🌐 Step 3: Deploy on Render.com (100% FREE)
+## First Use (30 seconds)
 
-1. **Sign up:** Go to https://dashboard.render.com/register
-   - Use your GitHub account (instant signup)
+1. **Enter URL** in address bar
+   - Type: `google.com` or `youtube.com`
 
-2. **Create Web Service:**
-   - Click the **"New +"** button (top right)
-   - Select **"Web Service"**
-   - Click **"Connect account"** to link GitHub
-   - Find and select your **RemoteBrowserRendering** repository
-   - Render will auto-detect all settings from `render.yaml`
+2. **Start Streaming**
+   - Click Settings (⚙️) button
+   - Click "Start Streaming"
 
-3. **Deploy:**
-   - Click **"Create Web Service"**
-   - Wait 5-10 minutes ☕ (Render installs everything)
-   - Your URL will be: `https://remote-browser-backend.onrender.com`
+3. **Wait for Load**
+   - Watch progress bar advance
+   - Simple sites: 5-10 seconds
+   - Complex sites: 20-30 seconds
 
-## ✅ Step 4: Test Your Browser
+4. **Interact**
+   - Click anywhere to click
+   - Scroll with mouse wheel
+   - Type in text fields
+   - Use arrow keys for suggestions
 
-1. Open your Render URL in a browser
-2. You'll see the Remote Browser interface
-3. Type a URL (e.g., `wikipedia.org`)
-4. Click **"Start Browser"**
-5. Wait 10-15 seconds for initialization
-6. You should see the webpage streaming at 60 FPS!
-7. Try clicking, scrolling, typing - it's fully interactive!
+## Keyboard Shortcuts
 
-## 🎉 That's It!
+| Key | Action |
+|-----|--------|
+| **Enter** | Navigate to URL |
+| **↓** | Next suggestion |
+| **↑** | Previous suggestion |
+| **Escape** | Close suggestions |
+| **Refresh** button | Reload page |
 
-Your remote browser is now running 24/7 for **FREE**!
+## Recommended Settings
 
-## 📱 Share Your Browser
+**For Best Experience:**
+- FPS: 20-25
+- Quality: 65-75%
 
-- Send your Render URL to friends
-- Add it to your portfolio
-- Tweet about it
-- Use it from any device
+**For Speed:**
+- FPS: 15
+- Quality: 55%
 
-## ⚙️ Optional: Custom Domain
+**For Quality:**
+- FPS: 30
+- Quality: 85%
 
-1. Go to your Render service settings
-2. Click "Custom Domain"
-3. Add your domain (e.g., `browser.yourdomain.com`)
-4. Update DNS as instructed
+## Test Sites
 
-## 🔧 Free Tier Limits
+**Fast (5-10s):**
+- google.com
+- wikipedia.org
+- github.com
 
-**Render Free Tier:**
-- ✅ 750 hours per month (enough for 24/7)
-- ⚠️ Sleeps after 15 minutes of inactivity
-- ⚠️ Cold start takes ~30 seconds after sleep
-- ✅ Automatic HTTPS included
+**Medium (10-15s):**
+- reddit.com
+- stackoverflow.com
+- amazon.com
 
-**Workaround for Sleep:**
-- Use [UptimeRobot](https://uptimerobot.com) to ping every 5 minutes
-- Keeps your browser awake 24/7
+**Slow (20-30s):**
+- youtube.com
+- instagram.com
+- facebook.com
 
-## 🆘 Common Issues
+## Troubleshooting
 
-### "Service Unavailable"
-- Your service is waking up from sleep (wait 30 seconds)
-- Check Render logs for errors
+| Problem | Solution |
+|---------|----------|
+| Won't load | Try google.com first |
+| Slow | Lower FPS/Quality |
+| No images | Wait 30 seconds |
+| Connection lost | Auto-reconnects in 5 attempts |
 
-### Can't connect
-- Make sure service is fully deployed (green checkmark on Render)
-- Clear browser cache
-- Try incognito mode
+## Deploy to Cloud
 
-### Slow performance
-- Free tier has limited resources
-- Lower FPS to 30 in settings
-- Reduce quality to 70%
+### Render
+```bash
+# Already configured
+# Push to GitHub
+# Auto-deploys to Render
+```
 
-## 🚀 Next Steps
+### Vercel
+```bash
+npm install -g vercel
+vercel
+```
 
-1. ⭐ **Star the GitHub repo** if you found this useful
-2. 🐛 **Report issues** on GitHub
-3. 💡 **Suggest features** you'd like to see
-4. 🔗 **Share** your deployment URL
+## Next Steps
 
-## 🎓 Advanced Options
-
-Want more performance? Check these free alternatives:
-
-- **Railway.app** - $5 free trial (faster, no sleep)
-- **Fly.io** - 3 free VMs (global deployment)
-- **Koyeb** - 2 free services (no sleep)
-
-See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed comparisons.
+- Read `README.md` for full documentation
+- Check `INPUT_SYSTEM_IMPROVEMENTS.md` for keyboard tips
+- See `REAL_PROGRESS_BAR.md` for progress details
 
 ---
 
-**Enjoy your free remote browser! 🌐✨**
+**Ready to stream!** 🚀
