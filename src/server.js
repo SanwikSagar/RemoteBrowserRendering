@@ -17,7 +17,7 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 // Initialize browser pool
 const browserPool = new BrowserPool({
-  maxBrowsers: 5,
+  maxBrowsers: 1,  // Reduced to 1 for free tier (512MB RAM)
   launchOptions: {
     headless: 'new',
     args: [
@@ -27,7 +27,38 @@ const browserPool = new BrowserPool({
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-sync',
+      '--metrics-recording-only',
+      '--disable-default-apps',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--autoplay-policy=user-gesture-required',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-breakpad',
+      '--disable-client-side-phishing-detection',
+      '--disable-component-update',
+      '--disable-domain-reliability',
+      '--disable-features=AudioServiceOutOfProcess',
+      '--disable-hang-monitor',
+      '--disable-ipc-flooding-protection',
+      '--disable-popup-blocking',
+      '--disable-print-preview',
+      '--disable-prompt-on-repost',
+      '--disable-renderer-backgrounding',
+      '--disable-speech-api',
+      '--hide-scrollbars',
+      '--ignore-gpu-blacklist',
+      '--metrics-recording-only',
+      '--no-pings',
+      '--password-store=basic',
+      '--use-mock-keychain',
+      '--force-color-profile=srgb',
+      '--disable-blink-features=AutomationControlled'
     ]
   }
 });
