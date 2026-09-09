@@ -92,7 +92,7 @@ export class StreamManager {
       }
 
       // Wait for page to stabilize
-      await page.waitForTimeout(500);
+      await new Promise(resolve => setTimeout(resolve, 500));
       console.log('✅ Page stabilized');
       sendProgress(80, 'Stabilizing page...', 'Nearly ready');
 
@@ -142,11 +142,14 @@ export class StreamManager {
             encoding: 'binary'
           });
 
-          // Compress with Sharp
+          // Compress with Sharp - HIGH QUALITY compression
           const optimizedJpeg = await sharp(screenshot)
             .jpeg({ 
               quality,
-              mozjpeg: true
+              mozjpeg: true,
+              chromaSubsampling: '4:4:4',  // Full chroma for quality
+              trellisQuantisation: true,    // Better quality
+              overshootDeringing: true      // Reduce artifacts
             })
             .toBuffer();
 
@@ -306,7 +309,7 @@ export class StreamManager {
               waitUntil: 'domcontentloaded', 
               timeout: 30000 
             });
-            await page.waitForTimeout(500);
+            await new Promise(resolve => setTimeout(resolve, 500));
           }
           
           // Send updated URL
