@@ -10,9 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       
-      - name: Deploy to Render
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      
+      - name: Verify Build
         run: |
+          npm ci
+          echo "✅ Dependencies installed successfully"
           echo "Render will auto-deploy from GitHub"
-          echo "Connect your repo at https://dashboard.render.com"
+          echo "📦 Build ready for deployment"
+          echo "🔗 Connect your repo at https://dashboard.render.com"

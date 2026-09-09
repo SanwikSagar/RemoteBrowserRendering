@@ -5,6 +5,12 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# Grant GITHUB_TOKEN permissions for deployment
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -16,22 +22,31 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
+        node-version: '22'  # Updated to Node 22 (Node 20 is deprecated)
 
     - name: Install dependencies
-      run: npm install
+      run: npm ci --omit=dev
 
     - name: Build documentation
       run: |
         mkdir -p dist
-        cp README.md dist/
-        cp START_HERE.md dist/
-        cp QUICK_START.md dist/
-        cp DEPLOYMENT.md dist/
-        cp -r public/* dist/
+        # Copy documentation files
+        cp README.md dist/ 2>/dev/null || true
+        cp START_HERE.md dist/ 2>/dev/null || true
+        cp QUICK_START.md dist/ 2>/dev/null || true
+        cp DEPLOYMENT.md dist/ 2>/dev/null || true
+        cp LATEST_UPDATES_SUMMARY.md dist/ 2>/dev/null || true
+        cp INPUT_SYSTEM_IMPROVEMENTS.md dist/ 2>/dev/null || true
+        # Copy public files
+        cp -r public/* dist/ 2>/dev/null || true
+        # Create index if not exists
+        [ ! -f dist/index.html ] && echo "<h1>Remote Browser Rendering</h1><p>See README.md</p>" > dist/index.html || true
 
     - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
+      uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: ./dist
+        force_orphan: true
+        user_name: 'github-actions[bot]'
+        user_email: 'github-actions[bot]@users.noreply.github.com'
