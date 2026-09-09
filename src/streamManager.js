@@ -11,7 +11,7 @@ export class StreamManager {
     const sessionId = randomUUID();
     const fps = Math.min(options.fps || 30, 30); // Cap at 30 FPS for free tier
     const frameInterval = 1000 / fps;
-    const quality = Math.min(Math.max(options.quality || 75, 50), 90); // Lower quality for free tier
+    const quality = Math.min(Math.max(options.quality || 70, 50), 85); // Lower quality for speed
     const width = options.width || 1280;  // Lower resolution for free tier
     const height = options.height || 720; // Lower resolution for free tier
 
@@ -28,23 +28,32 @@ export class StreamManager {
       deviceScaleFactor: 1
     });
 
-    // Optimize for performance
+    // Aggressive optimization for performance
     await page.setRequestInterception(true);
     page.on('request', (request) => {
-      // Block unnecessary resources for faster loading
       const resourceType = request.resourceType();
-      if (['font', 'media'].includes(resourceType)) {
-        request.abort();
+      // Block heavy resources for faster loading
+      if (['image', 'media', 'font', 'stylesheet'].includes(resourceType)) {
+        // Allow first-party images only
+        if (resourceType === 'image' && request.url().startsWith(url)) {
+          request.continue();
+        } else {
+          request.abort();
+        }
       } else {
         request.continue();
       }
     });
 
-    // Navigate to URL
+    // Disable unnecessary features for speed
+    await page.setJavaScriptEnabled(true); // Keep JS for functionality
+    await page.setCacheEnabled(false); // Disable cache for consistent testing
+
+    // Navigate to URL with fast timeout
     try {
       await page.goto(url, { 
-        waitUntil: 'networkidle2',
-        timeout: 30000 
+        waitUntil: 'domcontentloaded', // Faster than networkidle2
+        timeout: 15000 // Reduced timeout
       });
     } catch (error) {
       console.error(`Failed to navigate to ${url}:`, error);
@@ -56,27 +65,29 @@ export class StreamManager {
     let frameCount = 0;
     let lastFrameTime = Date.now();
 
-    // Streaming loop with frame timing
+    // Optimized streaming loop with better timing
     const streamLoop = async () => {
       if (!isStreaming) return;
 
-      const now = Date.now();
-      const elapsed = now - lastFrameTime;
+      const startTime = Date.now();
 
       try {
-        // Capture screenshot
+        // Capture screenshot with optimized settings
         const screenshot = await page.screenshot({
           type: 'jpeg',
           quality,
-          optimizeForSpeed: true
+          optimizeForSpeed: true, // Prioritize speed over size
+          encoding: 'binary'
         });
 
-        // Further optimize JPEG with sharp for smaller size
+        // Ultra-fast JPEG compression with Sharp
         const optimizedJpeg = await sharp(screenshot)
           .jpeg({ 
-            quality, 
+            quality: quality - 5, // Slightly lower for speed
             mozjpeg: true,
-            chromaSubsampling: '4:2:0'
+            chromaSubsampling: '4:2:0',
+            optimizeScans: false, // Faster encoding
+            progressive: false // Faster encoding
           })
           .toBuffer();
 
@@ -87,32 +98,37 @@ export class StreamManager {
             sessionId,
             frame: optimizedJpeg.toString('base64'),
             frameNumber: frameCount++,
-            timestamp: now
+            timestamp: startTime
           };
           ws.send(JSON.stringify(frameData));
         }
 
-        // Calculate next frame timing
-        const processingTime = Date.now() - now;
-        const nextFrameDelay = Math.max(0, frameInterval - processingTime);
+        // Adaptive frame timing for consistent FPS
+        const processingTime = Date.now() - startTime;
+        const targetDelay = frameInterval;
+        const nextFrameDelay = Math.max(0, targetDelay - processingTime);
 
         // Schedule next frame
         if (isStreaming) {
           setTimeout(streamLoop, nextFrameDelay);
         }
 
-        lastFrameTime = now;
+        lastFrameTime = startTime;
       } catch (error) {
         if (error.message.includes('Target closed')) {
           console.log(`Session ${sessionId} page closed`);
           isStreaming = false;
         } else {
           console.error('Streaming error:', error);
+          // Continue streaming despite errors
+          if (isStreaming) {
+            setTimeout(streamLoop, frameInterval);
+          }
         }
       }
     };
 
-    // Start streaming
+    // Start streaming immediately
     streamLoop();
 
     // Store session data

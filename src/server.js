@@ -15,50 +15,69 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Initialize browser pool
+// Initialize browser pool with optimized settings
 const browserPool = new BrowserPool({
   maxBrowsers: 1,  // Reduced to 1 for free tier (512MB RAM)
   launchOptions: {
     headless: 'new',
     args: [
+      // Core flags
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      
+      // Performance optimizations
       '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
       '--disable-gpu',
       '--disable-software-rasterizer',
-      '--disable-extensions',
+      '--disable-gl-drawing-for-tests',
+      
+      // Memory optimizations
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Use single process for lower memory
       '--disable-background-networking',
-      '--disable-sync',
-      '--metrics-recording-only',
-      '--disable-default-apps',
-      '--mute-audio',
-      '--no-default-browser-check',
-      '--autoplay-policy=user-gesture-required',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-breakpad',
       '--disable-client-side-phishing-detection',
-      '--disable-component-update',
-      '--disable-domain-reliability',
-      '--disable-features=AudioServiceOutOfProcess',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-default-apps',
+      '--disable-extensions',
+      '--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process',
       '--disable-hang-monitor',
       '--disable-ipc-flooding-protection',
       '--disable-popup-blocking',
-      '--disable-print-preview',
       '--disable-prompt-on-repost',
       '--disable-renderer-backgrounding',
-      '--disable-speech-api',
-      '--hide-scrollbars',
-      '--ignore-gpu-blacklist',
+      '--disable-sync',
+      '--force-color-profile=srgb',
       '--metrics-recording-only',
+      '--no-default-browser-check',
       '--no-pings',
       '--password-store=basic',
       '--use-mock-keychain',
-      '--force-color-profile=srgb',
-      '--disable-blink-features=AutomationControlled'
+      '--mute-audio',
+      
+      // Speed optimizations
+      '--disable-web-security', // Faster loading (use with caution)
+      '--disable-features=VizDisplayCompositor',
+      '--disable-threaded-animation',
+      '--disable-threaded-scrolling',
+      '--disable-checker-imaging',
+      '--disable-new-content-rendering-timeout',
+      '--disable-image-animation-resync',
+      '--run-all-compositor-stages-before-draw',
+      
+      // Network optimizations  
+      '--disable-domain-reliability',
+      '--disable-component-update',
+      
+      // Rendering optimizations
+      '--autoplay-policy=user-gesture-required',
+      '--disable-blink-features=AutomationControlled',
+      '--hide-scrollbars',
+      '--ignore-gpu-blacklist'
     ]
   }
 });
