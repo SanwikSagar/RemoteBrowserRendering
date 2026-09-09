@@ -11,9 +11,9 @@ export class StreamManager {
     const sessionId = randomUUID();
     const fps = Math.min(options.fps || 30, 30); // Cap at 30 FPS for free tier
     const frameInterval = 1000 / fps;
-    const quality = Math.min(Math.max(options.quality || 65, 50), 85); // Even lower for speed
-    const width = options.width || 1280;  // Lower resolution for free tier
-    const height = options.height || 720; // Lower resolution for free tier
+    const quality = Math.min(Math.max(options.quality || 60, 50), 90);
+    const width = options.width || 1280;
+    const height = options.height || 720;
 
     console.log(`📹 Starting stream session ${sessionId} for ${url}`);
     console.log(`⚙️  Settings: ${fps} FPS, ${quality}% quality, ${width}x${height}`);
@@ -28,21 +28,39 @@ export class StreamManager {
       deviceScaleFactor: 1
     });
 
-    // Ultra-aggressive optimization for maximum performance
+    // Smart resource management - allow critical resources for proper rendering
     await page.setRequestInterception(true);
+    const blockedDomains = new Set([
+      'doubleclick.net',
+      'googlesyndication.com',
+      'googletagmanager.com',
+      'facebook.com/tr',
+      'analytics.google.com',
+      'google-analytics.com',
+      'hotjar.com',
+      'mouseflow.com',
+      'luckyorange.com'
+    ]);
+
     page.on('request', (request) => {
       const resourceType = request.resourceType();
       const requestUrl = request.url();
       
-      // Block all non-essential resources for fastest loading
-      if (['media', 'font', 'stylesheet', 'image'].includes(resourceType)) {
+      // Block ads and trackers
+      if (blockedDomains.some(domain => requestUrl.includes(domain))) {
         request.abort();
-      } else if (resourceType === 'script') {
-        // Only allow same-origin scripts
+        return;
+      }
+      
+      // Allow critical resources but block heavy media
+      if (resourceType === 'media' || resourceType === 'font') {
+        request.abort();
+      } else if (resourceType === 'image') {
+        // Only allow images from main domain
         try {
           const pageOrigin = new URL(url).origin;
-          const scriptOrigin = new URL(requestUrl).origin;
-          if (pageOrigin === scriptOrigin) {
+          const resourceOrigin = new URL(requestUrl).origin;
+          if (pageOrigin === resourceOrigin || requestUrl.includes('logo') || requestUrl.includes('icon')) {
             request.continue();
           } else {
             request.abort();
@@ -55,54 +73,110 @@ export class StreamManager {
       }
     });
 
-    // Disable unnecessary features for speed
-    await page.setJavaScriptEnabled(true); // Keep JS for functionality
-    await page.setCacheEnabled(false); // Disable cache for consistent testing
+    // Enable JavaScript for modern sites
+    await page.setJavaScriptEnabled(true);
+    await page.setCacheEnabled(true); // Enable cache for faster repeated loads
 
-    // Navigate to URL with fast timeout
-    try {
-      await page.goto(url, { 
-        waitUntil: 'domcontentloaded', // Faster than networkidle2
-        timeout: 15000 // Reduced timeout
-      });
-    } catch (error) {
-      console.error(`Failed to navigate to ${url}:`, error);
+    // Set user agent to avoid bot detection
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    // Navigate to URL with retries
+    let navigationSuccess = false;
+    let lastError = null;
+    const maxRetries = 2;
+    
+    for (let i = 0; i < maxRetries && !navigationSuccess; i++) {
+      try {
+        await page.goto(url, { 
+          waitUntil: 'domcontentloaded',
+          timeout: 30000 // Increased timeout for complex sites
+        });
+        navigationSuccess = true;
+      } catch (error) {
+        lastError = error;
+        console.warn(`Navigation attempt ${i + 1} failed for ${url}:`, error.message);
+        
+        if (i < maxRetries - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
+
+    if (!navigationSuccess) {
+      console.error(`Failed to navigate to ${url} after ${maxRetries} attempts:`, lastError);
+      await page.close();
       this.browserPool.release(browser);
-      throw error;
+      throw lastError;
+    }
+
+    // Wait a bit for dynamic content to load
+    try {
+      await page.waitForTimeout(1000);
+    } catch (error) {
+      console.warn('Wait for timeout failed:', error);
     }
 
     let isStreaming = true;
     let frameCount = 0;
     let lastFrameTime = Date.now();
+    let errorCount = 0;
+    const maxErrors = 5;
 
-    // Optimized streaming loop with better timing
+    // Send initial page info
+    try {
+      const currentUrl = page.url();
+      const title = await page.title();
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({
+          type: 'pageInfo',
+          sessionId,
+          url: currentUrl,
+          title: title
+        }));
+      }
+    } catch (error) {
+      console.warn('Failed to get initial page info:', error);
+    }
+
+    // Optimized streaming loop with adaptive quality
     const streamLoop = async () => {
       if (!isStreaming) return;
 
       const startTime = Date.now();
 
       try {
+        // Check if page is still alive
+        if (page.isClosed()) {
+          console.log(`Session ${sessionId} page closed`);
+          isStreaming = false;
+          return;
+        }
+
         // Capture screenshot with optimized settings
         const screenshot = await page.screenshot({
           type: 'jpeg',
           quality,
-          optimizeForSpeed: true, // Prioritize speed over size
+          optimizeForSpeed: true,
           encoding: 'binary'
         });
 
-        // Ultra-fast JPEG compression with Sharp
+        // Fast JPEG compression with Sharp
         const optimizedJpeg = await sharp(screenshot)
+          .resize(width, height, {
+            fit: 'inside',
+            withoutEnlargement: true
+          })
           .jpeg({ 
-            quality: quality - 5, // Slightly lower for speed
+            quality: quality,
             mozjpeg: true,
             chromaSubsampling: '4:2:0',
-            optimizeScans: false, // Faster encoding
-            progressive: false // Faster encoding
+            optimizeScans: false,
+            progressive: false
           })
           .toBuffer();
 
-        // Send frame via WebSocket (optimized base64)
-        if (ws.readyState === 1) { // OPEN
+        // Send frame via WebSocket
+        if (ws.readyState === 1) {
           const frameData = {
             type: 'frame',
             sessionId,
@@ -111,12 +185,15 @@ export class StreamManager {
             timestamp: startTime
           };
           ws.send(JSON.stringify(frameData));
+          
+          // Reset error count on success
+          errorCount = 0;
         }
 
-        // Adaptive frame timing for consistent FPS
+        // Adaptive frame timing
         const processingTime = Date.now() - startTime;
         const targetDelay = frameInterval;
-        const nextFrameDelay = Math.max(0, targetDelay - processingTime);
+        const nextFrameDelay = Math.max(10, targetDelay - processingTime);
 
         // Schedule next frame
         if (isStreaming) {
@@ -125,15 +202,33 @@ export class StreamManager {
 
         lastFrameTime = startTime;
       } catch (error) {
-        if (error.message.includes('Target closed')) {
-          console.log(`Session ${sessionId} page closed`);
+        errorCount++;
+        
+        if (error.message.includes('Target closed') || error.message.includes('Session closed')) {
+          console.log(`Session ${sessionId} closed`);
           isStreaming = false;
-        } else {
-          console.error('Streaming error:', error);
-          // Continue streaming despite errors
-          if (isStreaming) {
-            setTimeout(streamLoop, frameInterval);
+          return;
+        }
+        
+        console.error(`Streaming error (${errorCount}/${maxErrors}):`, error.message);
+        
+        // Stop streaming if too many errors
+        if (errorCount >= maxErrors) {
+          console.error(`Too many errors in session ${sessionId}, stopping stream`);
+          isStreaming = false;
+          if (ws.readyState === 1) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Too many streaming errors'
+            }));
           }
+          return;
+        }
+        
+        // Continue streaming with exponential backoff
+        if (isStreaming) {
+          const backoffDelay = frameInterval * Math.pow(2, Math.min(errorCount, 3));
+          setTimeout(streamLoop, backoffDelay);
         }
       }
     };
@@ -204,27 +299,39 @@ export class StreamManager {
 
         case 'navigate':
           if (action.action === 'back') {
-            await page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
+            await page.goBack({ waitUntil: 'domcontentloaded', timeout: 20000 });
             console.log('⬅️ Navigate back');
           } else if (action.action === 'forward') {
-            await page.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 });
+            await page.goForward({ waitUntil: 'domcontentloaded', timeout: 20000 });
             console.log('➡️ Navigate forward');
           } else if (action.action === 'reload') {
-            await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
             console.log('🔄 Reload page');
           } else if (action.action === 'goto' && action.url) {
-            await page.goto(action.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await page.goto(action.url, { 
+              waitUntil: 'domcontentloaded', 
+              timeout: 30000 
+            });
             console.log(`🧭 Navigate to: ${action.url}`);
+            
+            // Wait for page to stabilize
+            await page.waitForTimeout(500);
           }
           
           // Send updated URL to client
-          const currentUrl = page.url();
-          if (ws.readyState === 1) {
-            ws.send(JSON.stringify({
-              type: 'pageInfo',
-              sessionId,
-              url: currentUrl
-            }));
+          try {
+            const currentUrl = page.url();
+            const title = await page.title();
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({
+                type: 'pageInfo',
+                sessionId,
+                url: currentUrl,
+                title: title
+              }));
+            }
+          } catch (error) {
+            console.warn('Failed to get page info:', error);
           }
           break;
 

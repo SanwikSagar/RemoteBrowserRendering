@@ -135,13 +135,23 @@ wss.on('connection', (ws) => {
       
       switch (data.type) {
         case 'start':
-          sessionId = await streamManager.startStream(data.url, ws, {
-            fps: data.fps || 60,
-            quality: data.quality || 80,
-            width: data.width || 1920,
-            height: data.height || 1080
-          });
-          ws.send(JSON.stringify({ type: 'started', sessionId }));
+          try {
+            sessionId = await streamManager.startStream(data.url, ws, {
+              fps: data.fps || 30,
+              quality: data.quality || 70,
+              width: data.width || 1280,
+              height: data.height || 720
+            });
+            ws.send(JSON.stringify({ type: 'started', sessionId }));
+          } catch (error) {
+            console.error('Failed to start stream:', error);
+            ws.send(JSON.stringify({ 
+              type: 'error', 
+              message: error.message.includes('timeout') ? 
+                'Navigation timeout - Site may be slow or blocking automated browsers' :
+                `Failed to start stream: ${error.message}`
+            }));
+          }
           break;
           
         case 'stop':
@@ -154,7 +164,12 @@ wss.on('connection', (ws) => {
           
         case 'interact':
           if (sessionId && data.action) {
-            await streamManager.handleInteraction(sessionId, data.action);
+            try {
+              await streamManager.handleInteraction(sessionId, data.action);
+            } catch (error) {
+              console.error('Interaction error:', error);
+              // Don't send error to client for minor interaction failures
+            }
           }
           break;
           
@@ -170,7 +185,11 @@ wss.on('connection', (ws) => {
   ws.on('close', async () => {
     console.log('🔌 WebSocket disconnected');
     if (sessionId) {
-      await streamManager.stopStream(sessionId);
+      try {
+        await streamManager.stopStream(sessionId);
+      } catch (error) {
+        console.error('Error stopping stream on disconnect:', error);
+      }
     }
   });
 

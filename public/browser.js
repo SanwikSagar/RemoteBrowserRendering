@@ -5,33 +5,34 @@ class RemoteBrowserClient {
     this.frameCount = 0;
     this.fpsCounter = 0;
     this.lastFpsUpdate = Date.now();
-    this.interactionMode = 'click';
     this.isStreaming = false;
-    this.currentPageUrl = '';
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 5;
+    this.reconnectDelay = 2000;
     
     this.elements = {
       urlInput: document.getElementById('urlInput'),
       fpsInput: document.getElementById('fpsInput'),
       qualityInput: document.getElementById('qualityInput'),
-      interactiveMode: document.getElementById('interactiveMode'),
-      startBtn: document.getElementById('startBtn'),
-      stopBtn: document.getElementById('stopBtn'),
-      goBtn: document.getElementById('goBtn'),
       backBtn: document.getElementById('backBtn'),
       forwardBtn: document.getElementById('forwardBtn'),
       refreshBtn: document.getElementById('refreshBtn'),
       homeBtn: document.getElementById('homeBtn'),
+      settingsBtn: document.getElementById('settingsBtn'),
+      settingsMenu: document.getElementById('settingsMenu'),
+      startStreamOption: document.getElementById('startStreamOption'),
+      stopStreamOption: document.getElementById('stopStreamOption'),
       stream: document.getElementById('stream'),
-      viewer: document.getElementById('viewer'),
+      viewport: document.getElementById('viewport'),
       placeholder: document.getElementById('placeholder'),
-      toolbar: document.getElementById('toolbar'),
-      clickTool: document.getElementById('clickTool'),
-      scrollTool: document.getElementById('scrollTool'),
-      status: document.getElementById('status'),
+      statusDot: document.getElementById('statusDot'),
+      statusText: document.getElementById('statusText'),
       currentUrl: document.getElementById('currentUrl'),
-      currentFps: document.getElementById('currentFps'),
+      fpsDisplay: document.getElementById('fpsDisplay'),
       frameCountEl: document.getElementById('frameCount'),
-      latency: document.getElementById('latency')
+      latency: document.getElementById('latency'),
+      loadingBar: document.getElementById('loadingBar'),
+      windowTitle: document.getElementById('windowTitle')
     };
 
     this.setupEventListeners();
@@ -39,65 +40,69 @@ class RemoteBrowserClient {
   }
 
   setupEventListeners() {
-    // Browser controls
-    this.elements.startBtn.addEventListener('click', () => this.startStream());
-    this.elements.stopBtn.addEventListener('click', () => this.stopStream());
-    this.elements.goBtn.addEventListener('click', () => this.navigate());
+    // Navigation controls
     this.elements.backBtn.addEventListener('click', () => this.sendInteraction({ type: 'navigate', action: 'back' }));
     this.elements.forwardBtn.addEventListener('click', () => this.sendInteraction({ type: 'navigate', action: 'forward' }));
-    this.elements.refreshBtn.addEventListener('click', () => this.sendInteraction({ type: 'navigate', action: 'reload' }));
+    this.elements.refreshBtn.addEventListener('click', () => this.navigate(this.elements.urlInput.value));
     this.elements.homeBtn.addEventListener('click', () => {
       this.elements.urlInput.value = 'https://www.google.com';
-      this.navigate();
+      this.navigate('https://www.google.com');
     });
     
     // URL input
     this.elements.urlInput.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') {
-        if (this.isStreaming) {
-          this.navigate();
-        } else {
-          this.startStream();
-        }
+        const url = this.elements.urlInput.value.trim();
+        this.navigate(url);
+      }
+    });
+
+    // Settings menu
+    this.elements.settingsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.elements.settingsMenu.classList.toggle('active');
+    });
+
+    this.elements.startStreamOption.addEventListener('click', () => {
+      this.startStream();
+      this.elements.settingsMenu.classList.remove('active');
+    });
+
+    this.elements.stopStreamOption.addEventListener('click', () => {
+      this.stopStream();
+      this.elements.settingsMenu.classList.remove('active');
+    });
+
+    // Close menu when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!this.elements.settingsBtn.contains(e.target)) {
+        this.elements.settingsMenu.classList.remove('active');
       }
     });
 
     // Stream interactions
     this.elements.stream.addEventListener('click', (e) => this.handleClick(e));
     this.elements.stream.addEventListener('wheel', (e) => this.handleScroll(e), { passive: false });
+    this.elements.stream.addEventListener('contextmenu', (e) => e.preventDefault());
     
-    // Keyboard events for the viewer
+    // Keyboard events
     document.addEventListener('keydown', (e) => {
-      if (this.isStreaming && this.elements.interactiveMode.checked) {
+      if (this.isStreaming && e.target !== this.elements.urlInput) {
         this.handleKeyboard(e);
       }
     });
-
-    // Tool selection
-    this.elements.clickTool.addEventListener('click', () => this.setInteractionMode('click'));
-    this.elements.scrollTool.addEventListener('click', () => this.setInteractionMode('scroll'));
-  }
-
-  setInteractionMode(mode) {
-    this.interactionMode = mode;
-    this.elements.clickTool.classList.toggle('active', mode === 'click');
-    this.elements.scrollTool.classList.toggle('active', mode === 'scroll');
-    this.elements.stream.style.cursor = mode === 'click' ? 'pointer' : 'grab';
   }
 
   handleClick(e) {
-    if (!this.isStreaming || !this.elements.interactiveMode.checked) return;
+    if (!this.isStreaming) return;
     
     e.preventDefault();
     const rect = this.elements.stream.getBoundingClientRect();
-    const scaleX = 1920 / rect.width;
-    const scaleY = 1080 / rect.height;
+    const scaleX = 1280 / rect.width;  // Match server viewport width
+    const scaleY = 720 / rect.height;   // Match server viewport height
     
     const x = Math.round((e.clientX - rect.left) * scaleX);
     const y = Math.round((e.clientY - rect.top) * scaleY);
-
-    // Visual feedback
-    this.showClickIndicator(e.clientX, e.clientY);
 
     this.sendInteraction({
       type: 'click',
@@ -110,7 +115,7 @@ class RemoteBrowserClient {
   }
 
   handleScroll(e) {
-    if (!this.isStreaming || !this.elements.interactiveMode.checked) return;
+    if (!this.isStreaming) return;
     
     e.preventDefault();
     const deltaY = e.deltaY;
@@ -119,12 +124,9 @@ class RemoteBrowserClient {
       type: 'scroll',
       deltaY: deltaY
     });
-
-    console.log(`📜 Scroll: ${deltaY}`);
   }
 
   handleKeyboard(e) {
-    // Only handle typing when focused on the viewer
     if (e.target === this.elements.urlInput) return;
 
     // Special keys
@@ -136,43 +138,40 @@ class RemoteBrowserClient {
         type: 'key',
         key: e.key
       });
-      console.log(`⌨️ Key: ${e.key}`);
-    } else if (e.key.length === 1) {
-      // Regular character
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
       this.sendInteraction({
         type: 'type',
         text: e.key
       });
-      console.log(`⌨️ Type: ${e.key}`);
     }
   }
 
-  showClickIndicator(x, y) {
-    const indicator = document.createElement('div');
-    indicator.className = 'click-indicator';
-    indicator.style.left = `${x - 10}px`;
-    indicator.style.top = `${y - 10}px`;
-    document.body.appendChild(indicator);
-    
-    setTimeout(() => indicator.remove(), 500);
-  }
+  navigate(url) {
+    if (!url) return;
 
-  navigate() {
+    const finalUrl = url.startsWith('http') ? url : 
+                     url.includes('.') ? `https://${url}` : 
+                     `https://www.google.com/search?q=${encodeURIComponent(url)}`;
+    
     if (!this.isStreaming) {
+      this.elements.urlInput.value = finalUrl;
       this.startStream();
       return;
     }
 
-    const url = this.elements.urlInput.value.trim();
-    if (!url) return;
+    this.elements.loadingBar.classList.add('active');
+    this.elements.urlInput.value = finalUrl;
 
-    const finalUrl = url.startsWith('http') ? url : `https://${url}`;
-    
     this.sendInteraction({
       type: 'navigate',
       action: 'goto',
       url: finalUrl
     });
+
+    setTimeout(() => {
+      this.elements.loadingBar.classList.remove('active');
+    }, 2000);
 
     console.log(`🧭 Navigate to: ${finalUrl}`);
   }
@@ -193,10 +192,12 @@ class RemoteBrowserClient {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
     
+    console.log(`🔌 Connecting to ${wsUrl}...`);
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       console.log('✅ WebSocket connected');
+      this.reconnectAttempts = 0;
       this.updateStatus('connected', 'Connected');
     };
 
@@ -214,8 +215,16 @@ class RemoteBrowserClient {
       this.updateStatus('disconnected', 'Disconnected');
       this.isStreaming = false;
       
-      // Attempt reconnection after 3 seconds
-      setTimeout(() => this.connect(), 3000);
+      // Attempt reconnection with exponential backoff
+      if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
+        this.reconnectAttempts++;
+        console.log(`⏳ Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+        setTimeout(() => this.connect(), delay);
+      } else {
+        console.error('❌ Max reconnection attempts reached');
+        this.updateStatus('disconnected', 'Connection failed');
+      }
     };
 
     this.ws.onerror = (error) => {
@@ -230,18 +239,15 @@ class RemoteBrowserClient {
         this.isStreaming = true;
         console.log(`📹 Stream started with session ID: ${this.sessionId}`);
         this.updateStatus('streaming', 'Streaming');
-        this.elements.startBtn.disabled = true;
-        this.elements.stopBtn.disabled = false;
-        this.elements.goBtn.disabled = false;
-        this.elements.backBtn.disabled = false;
-        this.elements.forwardBtn.disabled = false;
-        this.elements.refreshBtn.disabled = false;
-        this.elements.homeBtn.disabled = false;
+        this.enableNavigation(true);
         this.elements.placeholder.style.display = 'none';
         this.elements.stream.classList.add('active');
-        this.elements.toolbar.classList.add('active');
-        this.currentPageUrl = this.elements.urlInput.value;
-        this.elements.currentUrl.textContent = this.currentPageUrl;
+        this.elements.loadingBar.classList.add('active');
+        this.elements.startStreamOption.style.display = 'none';
+        this.elements.stopStreamOption.style.display = 'flex';
+        setTimeout(() => {
+          this.elements.loadingBar.classList.remove('active');
+        }, 2000);
         break;
 
       case 'frame':
@@ -250,9 +256,9 @@ class RemoteBrowserClient {
 
       case 'pageInfo':
         if (data.url) {
-          this.currentPageUrl = data.url;
-          this.elements.currentUrl.textContent = data.url;
+          this.elements.currentUrl.textContent = this.truncateUrl(data.url);
           this.elements.urlInput.value = data.url;
+          this.elements.windowTitle.textContent = data.title || data.url;
         }
         break;
 
@@ -263,14 +269,17 @@ class RemoteBrowserClient {
 
       case 'error':
         console.error('Server error:', data.message);
-        alert(`Error: ${data.message}`);
-        this.resetStream();
+        if (data.message.includes('timeout') || data.message.includes('Navigation')) {
+          this.showNotification('⚠️ Page loading timeout - Try a simpler page or wait and retry', 'warning');
+        } else {
+          this.showNotification(`❌ Error: ${data.message}`, 'error');
+        }
         break;
     }
   }
 
   renderFrame(data) {
-    // Preload image before displaying for smoother rendering
+    // Use object URL for better performance
     const img = new Image();
     img.onload = () => {
       this.elements.stream.src = img.src;
@@ -285,7 +294,7 @@ class RemoteBrowserClient {
       const elapsed = now - this.lastFpsUpdate;
       if (elapsed >= 1000) {
         const fps = Math.round((this.fpsCounter / elapsed) * 1000);
-        this.elements.currentFps.textContent = fps;
+        this.elements.fpsDisplay.textContent = `${fps} FPS`;
         this.fpsCounter = 0;
         this.lastFpsUpdate = now;
       }
@@ -295,36 +304,36 @@ class RemoteBrowserClient {
       this.elements.latency.textContent = `${latency}ms`;
     };
     
+    img.onerror = () => {
+      console.error('Failed to load frame');
+    };
+    
     img.src = `data:image/jpeg;base64,${data.frame}`;
   }
 
   startStream() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      alert('WebSocket not connected. Please wait...');
+      this.showNotification('⏳ Connecting to server...', 'info');
+      setTimeout(() => this.startStream(), 1000);
       return;
     }
 
-    const url = this.elements.urlInput.value.trim();
-    if (!url) {
-      alert('Please enter a URL');
-      return;
-    }
-
-    // Ensure URL has protocol
+    const url = this.elements.urlInput.value.trim() || 'https://www.google.com';
     const finalUrl = url.startsWith('http') ? url : `https://${url}`;
 
-    const fps = parseInt(this.elements.fpsInput.value) || 60;
-    const quality = parseInt(this.elements.qualityInput.value) || 85;
+    const fps = parseInt(this.elements.fpsInput.value) || 30;
+    const quality = parseInt(this.elements.qualityInput.value) || 70;
 
     console.log(`🚀 Starting stream for ${finalUrl}`);
+    console.log(`⚙️  Settings: ${fps} FPS, ${quality}% quality`);
 
     this.ws.send(JSON.stringify({
       type: 'start',
       url: finalUrl,
       fps,
       quality,
-      width: 1920,
-      height: 1080
+      width: 1280,  // Optimized resolution
+      height: 720
     }));
 
     this.frameCount = 0;
@@ -344,27 +353,89 @@ class RemoteBrowserClient {
   resetStream() {
     this.sessionId = null;
     this.isStreaming = false;
-    this.elements.startBtn.disabled = false;
-    this.elements.stopBtn.disabled = true;
-    this.elements.goBtn.disabled = true;
-    this.elements.backBtn.disabled = true;
-    this.elements.forwardBtn.disabled = true;
-    this.elements.refreshBtn.disabled = true;
-    this.elements.homeBtn.disabled = true;
+    this.enableNavigation(false);
     this.elements.stream.classList.remove('active');
-    this.elements.toolbar.classList.remove('active');
     this.elements.placeholder.style.display = 'block';
     this.updateStatus('connected', 'Connected');
-    this.elements.currentFps.textContent = '0';
+    this.elements.fpsDisplay.textContent = '0 FPS';
     this.elements.currentUrl.textContent = '-';
+    this.elements.windowTitle.textContent = 'Remote Browser';
     this.frameCount = 0;
+    this.elements.startStreamOption.style.display = 'flex';
+    this.elements.stopStreamOption.style.display = 'none';
+  }
+
+  enableNavigation(enabled) {
+    this.elements.backBtn.disabled = !enabled;
+    this.elements.forwardBtn.disabled = !enabled;
+    this.elements.refreshBtn.disabled = !enabled;
+    this.elements.homeBtn.disabled = !enabled;
   }
 
   updateStatus(type, text) {
-    this.elements.status.textContent = text;
-    this.elements.status.className = `status status-${type}`;
+    this.elements.statusText.textContent = text;
+    this.elements.statusDot.className = `status-dot ${type === 'connected' || type === 'streaming' ? '' : 'disconnected'}`;
+  }
+
+  truncateUrl(url) {
+    const maxLength = 50;
+    return url.length > maxLength ? url.substring(0, maxLength) + '...' : url;
+  }
+
+  showNotification(message, type = 'info') {
+    // Create notification element
+    const notification = document.createElement('div');
+    notification.style.cssText = `
+      position: fixed;
+      top: 60px;
+      right: 20px;
+      padding: 12px 20px;
+      background: ${type === 'error' ? '#ef4444' : type === 'warning' ? '#f59e0b' : '#3b82f6'};
+      color: white;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      z-index: 10000;
+      font-size: 14px;
+      max-width: 400px;
+      animation: slideIn 0.3s ease;
+    `;
+    notification.textContent = message;
+    document.body.appendChild(notification);
+
+    // Auto remove after 4 seconds
+    setTimeout(() => {
+      notification.style.animation = 'slideOut 0.3s ease';
+      setTimeout(() => notification.remove(), 300);
+    }, 4000);
   }
 }
+
+// Add animation styles
+const style = document.createElement('style');
+style.textContent = `
+  @keyframes slideIn {
+    from {
+      transform: translateX(400px);
+      opacity: 0;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes slideOut {
+    from {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    to {
+      transform: translateX(400px);
+      opacity: 0;
+    }
+  }
+`;
+document.head.appendChild(style);
 
 // Initialize client when page loads
 document.addEventListener('DOMContentLoaded', () => {
