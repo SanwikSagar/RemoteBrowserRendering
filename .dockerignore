@@ -2,6 +2,11 @@ node_modules
 npm-debug.log
 .git
 .gitignore
-README.md
 .env
 .DS_Store
+*.md
+.vscode
+.github
+DEPLOY*.txt
+DEPLOY*.bat
+READY_TO_DEPLOY.txt

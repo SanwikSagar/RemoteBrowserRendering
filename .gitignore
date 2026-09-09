@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-package-lock.json
 yarn.lock
 
 # Environment variables
@@ -22,3 +21,6 @@ Thumbs.db
 
 # Puppeteer cache
 .cache/
+
+# Keep package-lock.json for consistent deployments
+# package-lock.json is now tracked for production builds

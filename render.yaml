@@ -3,11 +3,13 @@ services:
     name: remote-browser-backend
     runtime: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install --production
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
-        value: 3000
+        value: 10000
+      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
+        value: false
     healthCheckPath: /health
