@@ -30,37 +30,17 @@
         .window-controls {
             display: flex;
             align-items: center;
+            justify-content: center;
             height: 40px;
             background: #202124;
-            padding: 0 8px;
-            -webkit-app-region: drag;
+            padding: 0 16px;
+            border-bottom: 1px solid #3c4043;
         }
-
-        .control-buttons {
-            display: flex;
-            gap: 8px;
-            -webkit-app-region: no-drag;
-        }
-
-        .control-btn {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            border: none;
-            cursor: pointer;
-        }
-
-        .control-btn.close { background: #ff5f57; }
-        .control-btn.minimize { background: #ffbd2e; }
-        .control-btn.maximize { background: #28ca42; }
 
         .window-title {
-            flex: 1;
-            text-align: center;
             color: #9aa0a6;
             font-size: 13px;
             font-weight: 500;
-            -webkit-app-region: no-drag;
         }
 
         /* Tabs Bar */
@@ -86,7 +66,6 @@
             cursor: pointer;
             max-width: 240px;
             min-width: 120px;
-            position: relative;
             transition: background 0.15s;
         }
 
@@ -103,7 +82,6 @@
             width: 16px;
             height: 16px;
             flex-shrink: 0;
-            border-radius: 2px;
         }
 
         .tab-title {
@@ -122,16 +100,11 @@
             border-radius: 50%;
             font-size: 18px;
             opacity: 0.7;
-            flex-shrink: 0;
         }
 
         .tab-close:hover {
             background: rgba(0, 0, 0, 0.1);
             opacity: 1;
-        }
-
-        .tab.active .tab-close:hover {
-            background: rgba(0, 0, 0, 0.08);
         }
 
         .new-tab-btn {
@@ -237,33 +210,6 @@
             color: #80868b;
         }
 
-        .url-actions {
-            display: flex;
-            gap: 4px;
-        }
-
-        .url-action-btn {
-            width: 28px;
-            height: 28px;
-            border: none;
-            background: transparent;
-            border-radius: 14px;
-            color: #5f6368;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .url-action-btn:hover {
-            background: rgba(0, 0, 0, 0.04);
-        }
-
-        .url-action-btn svg {
-            width: 16px;
-            height: 16px;
-        }
-
         /* Browser Actions */
         .browser-actions {
             display: flex;
@@ -293,80 +239,227 @@
             height: 18px;
         }
 
+        /* Dropdown Menu */
+        .dropdown-menu {
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 4px;
+            background: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+            min-width: 250px;
+            padding: 8px 0;
+            display: none;
+            z-index: 1000;
+        }
+
+        .dropdown-menu.active {
+            display: block;
+        }
+
+        .menu-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 16px;
+            font-size: 13px;
+            color: #202124;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .menu-item:hover {
+            background: #f1f3f4;
+        }
+
+        .menu-item svg {
+            width: 16px;
+            height: 16px;
+            color: #5f6368;
+        }
+
+        .menu-item input[type="number"] {
+            width: 60px;
+            border: 1px solid #dadce0;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 13px;
+        }
+
+        .menu-separator {
+            height: 1px;
+            background: #dadce0;
+            margin: 4px 0;
+        }
+
         /* Content Area */
         .content-area {
             flex: 1;
             position: relative;
-            background: #ffffff;
+            background: #f8f9fa;
             overflow: hidden;
-            display: flex;
-            flex-direction: column;
         }
 
         .loading-bar {
             position: absolute;
             top: 0;
             left: 0;
-            height: 2px;
-            background: #1a73e8;
+            height: 3px;
+            background: linear-gradient(90deg, #1a73e8, #34a853, #fbbc04, #ea4335);
             width: 0%;
-            transition: width 0.3s ease;
-            z-index: 1000;
+            z-index: 1001;
+            opacity: 0;
         }
 
         .loading-bar.active {
-            animation: loading 2s ease-in-out;
+            opacity: 1;
+            animation: loading 2s ease-in-out infinite;
         }
 
         @keyframes loading {
             0% { width: 0%; }
             50% { width: 70%; }
-            100% { width: 100%; }
+            100% { width: 95%; }
         }
 
         .viewport {
-            flex: 1;
+            width: 100%;
+            height: 100%;
             position: relative;
-            overflow: hidden;
-            background: #ffffff;
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
         #stream {
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
             display: none;
+            background: #ffffff;
         }
 
         #stream.active {
             display: block;
         }
 
+        /* Placeholder */
         .placeholder {
             text-align: center;
-            color: #5f6368;
             padding: 40px;
+            max-width: 500px;
         }
 
         .placeholder-icon {
-            width: 64px;
-            height: 64px;
-            margin: 0 auto 16px;
-            opacity: 0.4;
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 24px;
+            opacity: 0.3;
+            color: #5f6368;
         }
 
         .placeholder h2 {
-            font-size: 20px;
+            font-size: 24px;
             font-weight: 400;
-            margin-bottom: 8px;
+            margin-bottom: 12px;
+            color: #202124;
         }
 
         .placeholder p {
             font-size: 14px;
+            color: #5f6368;
+            line-height: 1.6;
+        }
+
+        /* Loading Spinner */
+        .loading-spinner {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+            z-index: 999;
+        }
+
+        .loading-spinner.active {
+            display: flex;
+        }
+
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 4px solid #e8eaed;
+            border-top-color: #1a73e8;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            font-size: 16px;
+            color: #5f6368;
+            font-weight: 500;
+        }
+
+        .loading-subtext {
+            font-size: 13px;
             color: #80868b;
+        }
+
+        /* Connection Overlay */
+        .connection-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(248, 249, 250, 0.98);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .connection-overlay.active {
+            display: flex;
+        }
+
+        .connection-message {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .connection-icon {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 20px;
+            color: #ea4335;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 0.8; }
+        }
+
+        .connection-title {
+            font-size: 20px;
+            font-weight: 500;
+            color: #202124;
+            margin-bottom: 8px;
+        }
+
+        .connection-subtitle {
+            font-size: 14px;
+            color: #5f6368;
         }
 
         /* Status Bar */
@@ -399,10 +492,17 @@
             height: 6px;
             border-radius: 50%;
             background: #34a853;
+            animation: pulse-dot 2s ease-in-out infinite;
         }
 
         .status-dot.disconnected {
             background: #ea4335;
+            animation: none;
+        }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
         }
 
         .status-right {
@@ -411,67 +511,8 @@
             gap: 12px;
         }
 
-        /* Dropdown Menus */
-        .dropdown-menu {
-            position: absolute;
-            top: 100%;
-            right: 0;
-            margin-top: 4px;
-            background: #ffffff;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
-            min-width: 200px;
-            padding: 8px 0;
-            display: none;
-            z-index: 1000;
-        }
-
-        .dropdown-menu.active {
-            display: block;
-        }
-
-        .menu-item {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 8px 16px;
-            font-size: 13px;
-            color: #202124;
-            cursor: pointer;
-            transition: background 0.15s;
-        }
-
-        .menu-item:hover {
-            background: #f1f3f4;
-        }
-
-        .menu-item svg {
-            width: 16px;
-            height: 16px;
-            color: #5f6368;
-        }
-
-        .menu-separator {
-            height: 1px;
-            background: #dadce0;
-            margin: 4px 0;
-        }
-
         /* Responsive Design */
         @media (max-width: 768px) {
-            .tabs-bar {
-                overflow-x: auto;
-                scrollbar-width: none;
-            }
-
-            .tabs-bar::-webkit-scrollbar {
-                display: none;
-            }
-
-            .tab {
-                min-width: 100px;
-            }
-
             .nav-bar {
                 flex-wrap: wrap;
             }
@@ -482,8 +523,16 @@
                 margin: 4px 0 0 0;
             }
 
-            .status-bar {
-                font-size: 10px;
+            .placeholder {
+                padding: 20px;
+            }
+
+            .placeholder h2 {
+                font-size: 20px;
+            }
+
+            .placeholder p {
+                font-size: 13px;
             }
         }
 
@@ -507,24 +556,19 @@
     <div class="browser-window">
         <!-- Window Controls -->
         <div class="window-controls">
-            <div class="control-buttons">
-                <button class="control-btn close"></button>
-                <button class="control-btn minimize"></button>
-                <button class="control-btn maximize"></button>
-            </div>
-            <span class="window-title" id="windowTitle">Remote Browser</span>
+            <span class="window-title" id="windowTitle">🌐 Remote Browser</span>
         </div>
 
         <!-- Tabs Bar -->
         <div class="tabs-bar">
-            <div class="tab active" data-tab-id="1">
+            <div class="tab active">
                 <svg class="tab-favicon" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M8 0C3.58 0 0 3.58 0 8s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/>
                 </svg>
                 <span class="tab-title">New Tab</span>
                 <span class="tab-close">×</span>
             </div>
-            <button class="new-tab-btn" id="newTabBtn" title="New Tab">+</button>
+            <button class="new-tab-btn" title="New Tab">+</button>
         </div>
 
         <!-- Navigation Bar -->
@@ -551,19 +595,11 @@
             </button>
 
             <div class="url-bar-container">
-                <div class="loading-bar" id="loadingBar"></div>
                 <div class="url-bar">
                     <svg class="security-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
                     </svg>
                     <input type="text" class="url-input" id="urlInput" placeholder="Search Google or type a URL" value="https://www.google.com">
-                    <div class="url-actions">
-                        <button class="url-action-btn" id="bookmarkBtn" title="Bookmark">
-                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"></path>
-                            </svg>
-                        </button>
-                    </div>
                 </div>
             </div>
 
@@ -593,13 +629,13 @@
                             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                             </svg>
-                            <span>FPS: <input type="number" id="fpsInput" min="15" max="60" value="30" style="width: 50px; border: 1px solid #dadce0; border-radius: 4px; padding: 2px 6px;"></span>
+                            <span>FPS: <input type="number" id="fpsInput" min="10" max="30" value="20"></span>
                         </div>
                         <div class="menu-item">
                             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
                             </svg>
-                            <span>Quality: <input type="number" id="qualityInput" min="50" max="100" value="70" style="width: 50px; border: 1px solid #dadce0; border-radius: 4px; padding: 2px 6px;"></span>
+                            <span>Quality: <input type="number" id="qualityInput" min="50" max="90" value="65"></span>
                         </div>
                     </div>
                 </button>
@@ -608,15 +644,38 @@
 
         <!-- Content Area -->
         <div class="content-area">
+            <div class="loading-bar" id="loadingBar"></div>
+            
             <div class="viewport" id="viewport">
                 <img id="stream" alt="Browser Stream">
+                
+                <!-- Placeholder -->
                 <div class="placeholder" id="placeholder">
                     <svg class="placeholder-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"></path>
                     </svg>
-                    <h2>Remote Browser</h2>
-                    <p>Enter a URL and start streaming from Settings</p>
+                    <h2>🌐 Remote Browser</h2>
+                    <p>Enter a URL above and click <strong>Settings → Start Streaming</strong><br>
+                    or press <strong>Enter</strong> to navigate</p>
+                </div>
+
+                <!-- Loading Spinner -->
+                <div class="loading-spinner" id="loadingSpinner">
+                    <div class="spinner"></div>
+                    <div class="loading-text" id="loadingText">Loading page...</div>
+                    <div class="loading-subtext" id="loadingSubtext">This may take 10-30 seconds for heavy sites</div>
+                </div>
+
+                <!-- Connection Overlay -->
+                <div class="connection-overlay" id="connectionOverlay">
+                    <div class="connection-message">
+                        <svg class="connection-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636a9 9 0 010 12.728m0 0l-2.829-2.829m2.829 2.829L21 21M15.536 8.464a5 5 0 010 7.072m0 0l-2.829-2.829m-4.243 2.829a4.978 4.978 0 01-1.414-2.83m-1.414 5.658a9 9 0 01-2.167-9.238m7.824 2.167a1 1 0 111.414 1.414m-1.414-1.414L3 3m8.293 8.293l1.414 1.414"></path>
+                        </svg>
+                        <div class="connection-title" id="connectionTitle">Connecting to server...</div>
+                        <div class="connection-subtitle" id="connectionSubtitle">Please wait while we establish connection</div>
+                    </div>
                 </div>
             </div>
         </div>

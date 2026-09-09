@@ -9,6 +9,7 @@ class RemoteBrowserClient {
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
     this.reconnectDelay = 2000;
+    this.connectionRetryTimeout = null;
     
     this.elements = {
       urlInput: document.getElementById('urlInput'),
@@ -25,6 +26,12 @@ class RemoteBrowserClient {
       stream: document.getElementById('stream'),
       viewport: document.getElementById('viewport'),
       placeholder: document.getElementById('placeholder'),
+      loadingSpinner: document.getElementById('loadingSpinner'),
+      loadingText: document.getElementById('loadingText'),
+      loadingSubtext: document.getElementById('loadingSubtext'),
+      connectionOverlay: document.getElementById('connectionOverlay'),
+      connectionTitle: document.getElementById('connectionTitle'),
+      connectionSubtitle: document.getElementById('connectionSubtitle'),
       statusDot: document.getElementById('statusDot'),
       statusText: document.getElementById('statusText'),
       currentUrl: document.getElementById('currentUrl'),
@@ -36,6 +43,7 @@ class RemoteBrowserClient {
     };
 
     this.setupEventListeners();
+    this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection');
     this.connect();
   }
 
@@ -93,13 +101,36 @@ class RemoteBrowserClient {
     });
   }
 
+  showLoadingSpinner(text = 'Loading page...', subtext = 'This may take 10-30 seconds for heavy sites') {
+    this.elements.loadingText.textContent = text;
+    this.elements.loadingSubtext.textContent = subtext;
+    this.elements.loadingSpinner.classList.add('active');
+    this.elements.placeholder.style.display = 'none';
+    this.elements.loadingBar.classList.add('active');
+  }
+
+  hideLoadingSpinner() {
+    this.elements.loadingSpinner.classList.remove('active');
+    this.elements.loadingBar.classList.remove('active');
+  }
+
+  showConnectionOverlay(title, subtitle) {
+    this.elements.connectionTitle.textContent = title;
+    this.elements.connectionSubtitle.textContent = subtitle;
+    this.elements.connectionOverlay.classList.add('active');
+  }
+
+  hideConnectionOverlay() {
+    this.elements.connectionOverlay.classList.remove('active');
+  }
+
   handleClick(e) {
     if (!this.isStreaming) return;
     
     e.preventDefault();
     const rect = this.elements.stream.getBoundingClientRect();
-    const scaleX = 1280 / rect.width;  // Match server viewport width
-    const scaleY = 720 / rect.height;   // Match server viewport height
+    const scaleX = 1280 / rect.width;
+    const scaleY = 720 / rect.height;
     
     const x = Math.round((e.clientX - rect.left) * scaleX);
     const y = Math.round((e.clientY - rect.top) * scaleY);
@@ -110,40 +141,29 @@ class RemoteBrowserClient {
       y,
       button: e.button === 2 ? 'right' : 'left'
     });
-
-    console.log(`🖱️ Click at (${x}, ${y})`);
   }
 
   handleScroll(e) {
     if (!this.isStreaming) return;
     
     e.preventDefault();
-    const deltaY = e.deltaY;
-
     this.sendInteraction({
       type: 'scroll',
-      deltaY: deltaY
+      deltaY: e.deltaY
     });
   }
 
   handleKeyboard(e) {
     if (e.target === this.elements.urlInput) return;
 
-    // Special keys
     const specialKeys = ['Enter', 'Backspace', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
     
     if (specialKeys.includes(e.key)) {
       e.preventDefault();
-      this.sendInteraction({
-        type: 'key',
-        key: e.key
-      });
+      this.sendInteraction({ type: 'key', key: e.key });
     } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
-      this.sendInteraction({
-        type: 'type',
-        text: e.key
-      });
+      this.sendInteraction({ type: 'type', text: e.key });
     }
   }
 
@@ -154,26 +174,20 @@ class RemoteBrowserClient {
                      url.includes('.') ? `https://${url}` : 
                      `https://www.google.com/search?q=${encodeURIComponent(url)}`;
     
+    this.elements.urlInput.value = finalUrl;
+
     if (!this.isStreaming) {
-      this.elements.urlInput.value = finalUrl;
       this.startStream();
       return;
     }
 
-    this.elements.loadingBar.classList.add('active');
-    this.elements.urlInput.value = finalUrl;
+    this.showLoadingSpinner('Navigating...', 'Loading new page');
 
     this.sendInteraction({
       type: 'navigate',
       action: 'goto',
       url: finalUrl
     });
-
-    setTimeout(() => {
-      this.elements.loadingBar.classList.remove('active');
-    }, 2000);
-
-    console.log(`🧭 Navigate to: ${finalUrl}`);
   }
 
   sendInteraction(action) {
@@ -189,16 +203,28 @@ class RemoteBrowserClient {
   }
 
   connect() {
+    if (this.connectionRetryTimeout) {
+      clearTimeout(this.connectionRetryTimeout);
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
     
     console.log(`🔌 Connecting to ${wsUrl}...`);
-    this.ws = new WebSocket(wsUrl);
+    
+    try {
+      this.ws = new WebSocket(wsUrl);
+    } catch (error) {
+      console.error('Failed to create WebSocket:', error);
+      this.handleConnectionFailure();
+      return;
+    }
 
     this.ws.onopen = () => {
       console.log('✅ WebSocket connected');
       this.reconnectAttempts = 0;
       this.updateStatus('connected', 'Connected');
+      this.hideConnectionOverlay();
     };
 
     this.ws.onmessage = (event) => {
@@ -213,23 +239,40 @@ class RemoteBrowserClient {
     this.ws.onclose = () => {
       console.log('❌ WebSocket disconnected');
       this.updateStatus('disconnected', 'Disconnected');
-      this.isStreaming = false;
       
-      // Attempt reconnection with exponential backoff
-      if (this.reconnectAttempts < this.maxReconnectAttempts) {
-        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
-        this.reconnectAttempts++;
-        console.log(`⏳ Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-        setTimeout(() => this.connect(), delay);
-      } else {
-        console.error('❌ Max reconnection attempts reached');
-        this.updateStatus('disconnected', 'Connection failed');
+      if (this.isStreaming) {
+        this.showConnectionOverlay('Connection Lost', 'Attempting to reconnect...');
       }
+      
+      this.handleConnectionFailure();
     };
 
     this.ws.onerror = (error) => {
       console.error('WebSocket error:', error);
     };
+  }
+
+  handleConnectionFailure() {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      const delay = this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts);
+      this.reconnectAttempts++;
+      
+      console.log(`⏳ Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+      
+      this.showConnectionOverlay(
+        'Reconnecting...',
+        `Attempt ${this.reconnectAttempts} of ${this.maxReconnectAttempts} - Please wait`
+      );
+      
+      this.connectionRetryTimeout = setTimeout(() => this.connect(), delay);
+    } else {
+      console.error('❌ Max reconnection attempts reached');
+      this.updateStatus('disconnected', 'Connection Failed');
+      this.showConnectionOverlay(
+        'Connection Failed',
+        'Unable to connect to server. Please refresh the page to try again.'
+      );
+    }
   }
 
   handleMessage(data) {
@@ -241,25 +284,27 @@ class RemoteBrowserClient {
         this.updateStatus('streaming', 'Streaming');
         this.enableNavigation(true);
         this.elements.placeholder.style.display = 'none';
-        this.elements.stream.classList.add('active');
-        this.elements.loadingBar.classList.add('active');
         this.elements.startStreamOption.style.display = 'none';
         this.elements.stopStreamOption.style.display = 'flex';
-        setTimeout(() => {
-          this.elements.loadingBar.classList.remove('active');
-        }, 2000);
+        this.showLoadingSpinner('Loading page...', 'Please wait, this may take up to 30 seconds');
         break;
 
       case 'frame':
         this.renderFrame(data);
+        // Hide loading spinner on first frame
+        if (this.frameCount === 0) {
+          this.hideLoadingSpinner();
+          this.elements.stream.classList.add('active');
+        }
         break;
 
       case 'pageInfo':
         if (data.url) {
           this.elements.currentUrl.textContent = this.truncateUrl(data.url);
           this.elements.urlInput.value = data.url;
-          this.elements.windowTitle.textContent = data.title || data.url;
+          this.elements.windowTitle.textContent = data.title || '🌐 Remote Browser';
         }
+        this.hideLoadingSpinner();
         break;
 
       case 'stopped':
@@ -269,17 +314,13 @@ class RemoteBrowserClient {
 
       case 'error':
         console.error('Server error:', data.message);
-        if (data.message.includes('timeout') || data.message.includes('Navigation')) {
-          this.showNotification('⚠️ Page loading timeout - Try a simpler page or wait and retry', 'warning');
-        } else {
-          this.showNotification(`❌ Error: ${data.message}`, 'error');
-        }
+        this.hideLoadingSpinner();
+        this.showNotification(`❌ ${data.message}`, 'error');
         break;
     }
   }
 
   renderFrame(data) {
-    // Use object URL for better performance
     const img = new Image();
     img.onload = () => {
       this.elements.stream.src = img.src;
@@ -313,16 +354,22 @@ class RemoteBrowserClient {
 
   startStream() {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.showNotification('⏳ Connecting to server...', 'info');
-      setTimeout(() => this.startStream(), 1000);
+      this.showConnectionOverlay('Connecting...', 'Please wait while we connect to the server');
+      setTimeout(() => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.startStream();
+        }
+      }, 1000);
       return;
     }
 
     const url = this.elements.urlInput.value.trim() || 'https://www.google.com';
-    const finalUrl = url.startsWith('http') ? url : `https://${url}`;
+    const finalUrl = url.startsWith('http') ? url : 
+                     url.includes('.') ? `https://${url}` : 
+                     url;
 
-    const fps = parseInt(this.elements.fpsInput.value) || 30;
-    const quality = parseInt(this.elements.qualityInput.value) || 70;
+    const fps = parseInt(this.elements.fpsInput.value) || 20;
+    const quality = parseInt(this.elements.qualityInput.value) || 65;
 
     console.log(`🚀 Starting stream for ${finalUrl}`);
     console.log(`⚙️  Settings: ${fps} FPS, ${quality}% quality`);
@@ -332,13 +379,18 @@ class RemoteBrowserClient {
       url: finalUrl,
       fps,
       quality,
-      width: 1280,  // Optimized resolution
+      width: 1280,
       height: 720
     }));
 
     this.frameCount = 0;
     this.fpsCounter = 0;
     this.lastFpsUpdate = Date.now();
+    
+    this.showLoadingSpinner(
+      'Starting browser...',
+      'Loading page, please wait'
+    );
   }
 
   stopStream() {
@@ -348,6 +400,7 @@ class RemoteBrowserClient {
 
     console.log('🛑 Stopping stream');
     this.ws.send(JSON.stringify({ type: 'stop' }));
+    this.hideLoadingSpinner();
   }
 
   resetStream() {
@@ -356,10 +409,11 @@ class RemoteBrowserClient {
     this.enableNavigation(false);
     this.elements.stream.classList.remove('active');
     this.elements.placeholder.style.display = 'block';
+    this.hideLoadingSpinner();
     this.updateStatus('connected', 'Connected');
     this.elements.fpsDisplay.textContent = '0 FPS';
     this.elements.currentUrl.textContent = '-';
-    this.elements.windowTitle.textContent = 'Remote Browser';
+    this.elements.windowTitle.textContent = '🌐 Remote Browser';
     this.frameCount = 0;
     this.elements.startStreamOption.style.display = 'flex';
     this.elements.stopStreamOption.style.display = 'none';
@@ -378,18 +432,17 @@ class RemoteBrowserClient {
   }
 
   truncateUrl(url) {
-    const maxLength = 50;
+    const maxLength = 60;
     return url.length > maxLength ? url.substring(0, maxLength) + '...' : url;
   }
 
   showNotification(message, type = 'info') {
-    // Create notification element
     const notification = document.createElement('div');
     notification.style.cssText = `
       position: fixed;
       top: 60px;
       right: 20px;
-      padding: 12px 20px;
+      padding: 16px 24px;
       background: ${type === 'error' ? '#ef4444' : type === 'warning' ? '#f59e0b' : '#3b82f6'};
       color: white;
       border-radius: 8px;
@@ -398,15 +451,15 @@ class RemoteBrowserClient {
       font-size: 14px;
       max-width: 400px;
       animation: slideIn 0.3s ease;
+      line-height: 1.5;
     `;
     notification.textContent = message;
     document.body.appendChild(notification);
 
-    // Auto remove after 4 seconds
     setTimeout(() => {
       notification.style.animation = 'slideOut 0.3s ease';
       setTimeout(() => notification.remove(), 300);
-    }, 4000);
+    }, 5000);
   }
 }
 
@@ -414,25 +467,13 @@ class RemoteBrowserClient {
 const style = document.createElement('style');
 style.textContent = `
   @keyframes slideIn {
-    from {
-      transform: translateX(400px);
-      opacity: 0;
-    }
-    to {
-      transform: translateX(0);
-      opacity: 1;
-    }
+    from { transform: translateX(400px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
   }
 
   @keyframes slideOut {
-    from {
-      transform: translateX(0);
-      opacity: 1;
-    }
-    to {
-      transform: translateX(400px);
-      opacity: 0;
-    }
+    from { transform: translateX(0); opacity: 1; }
+    to { transform: translateX(400px); opacity: 0; }
   }
 `;
 document.head.appendChild(style);
