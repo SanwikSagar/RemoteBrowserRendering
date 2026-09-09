@@ -1,0 +1,29 @@
+{
+  "name": "remote-browser-rendering",
+  "version": "1.0.0",
+  "description": "High-performance remote browser rendering system streaming webpages as JPEG at 60 FPS",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": [
+    "browser",
+    "rendering",
+    "puppeteer",
+    "streaming",
+    "jpeg"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "puppeteer": "^21.6.1",
+    "ws": "^8.16.0",
+    "sharp": "^0.33.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
