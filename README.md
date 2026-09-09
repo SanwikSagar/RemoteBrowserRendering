@@ -1,16 +1,65 @@
 # 🌐 Remote Browser Rendering System
 
-A high-performance remote browser rendering system that captures and streams modern webpages as optimized JPEG images at 60 FPS using Puppeteer, WebSockets, and Node.js.
+A high-performance remote browser that streams any webpage as optimized JPEG images at 60 FPS. Fully interactive with click, scroll, and keyboard support. Built with Puppeteer, WebSockets, and Node.js.
+
+## 🚀 **Deploy NOW (100% FREE)**
+
+### ⚡ Quick Deploy to Render.com (5 minutes)
+
+1. **Push to GitHub:**
+```bash
+git init
+git add .
+git commit -m "Deploy Remote Browser"
+git branch -M main
+git remote add origin YOUR_GITHUB_REPO
+git push -u origin main
+```
+
+2. **Deploy on Render:**
+   - Go to [dashboard.render.com](https://dashboard.render.com)
+   - Click "New +" → "Web Service"
+   - Connect your GitHub repo
+   - Click "Create Web Service" (settings are auto-detected!)
+   - Wait 5-10 minutes ☕
+
+3. **Done!** Your browser will be live at: `https://remote-browser-backend.onrender.com`
+
+📖 **[Quick Start Guide](QUICK_START.md)** • **[Deployment Options](DEPLOYMENT.md)**
+
+---
 
 ## ✨ Features
 
+## ✨ Features
+
+### 🎮 Full Browser Experience
 - **Real-time streaming** at up to 60 FPS
-- **Optimized JPEG compression** using Sharp and MozJPEG
-- **Browser pooling** for efficient resource management
-- **WebSocket-based** low-latency streaming
-- **Interactive controls** for FPS and quality settings
-- **Modern web UI** with real-time statistics
-- **Production-ready** with graceful shutdown and error handling
+- **Fully interactive** - Click, scroll, type, and navigate
+- **Tab management** - Multiple tabs support
+- **Navigation controls** - Back, forward, refresh, home
+- **Bookmarks** - Save your favorite sites
+- **History** - View and revisit browsed pages
+- **Zoom controls** - Zoom in/out on pages
+- **Fullscreen mode** - Immersive viewing experience
+- **Secure HTTPS** indicator
+- **Auto-complete** suggestions
+
+### ⚡ Performance Optimized
+- **MozJPEG compression** - 10-20% better than standard JPEG
+- **Chroma subsampling (4:2:0)** - Minimal quality loss
+- **Browser pooling** - Reuses browser instances
+- **Request interception** - Blocks unnecessary resources
+- **Adaptive frame timing** - Maintains consistent FPS
+- **Base64 encoding** - Efficient WebSocket transfer
+
+### 🛠️ Production Ready
+- **Browser pool management** - Efficient resource usage
+- **WebSocket streaming** - Low-latency real-time updates
+- **Graceful shutdown** - Proper cleanup
+- **Health checks** - Monitoring endpoints
+- **Error handling** - Robust error recovery
+- **Docker support** - Containerized deployment
 
 ## 🏗️ Architecture
 
