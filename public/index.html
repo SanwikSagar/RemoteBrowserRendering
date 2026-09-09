@@ -204,10 +204,73 @@
             font-size: 14px;
             color: #202124;
             outline: none;
+            font-size: 15px;
         }
 
         .url-input::placeholder {
             color: #80868b;
+        }
+
+        /* Search Suggestions */
+        .suggestions {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #ffffff;
+            border-radius: 0 0 8px 8px;
+            max-height: 300px;
+            overflow-y: auto;
+            display: none;
+            z-index: 100;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .suggestions.active {
+            display: block;
+        }
+
+        .suggestion-item {
+            padding: 12px 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.1s;
+            border-bottom: 1px solid #f1f3f4;
+        }
+
+        .suggestion-item:last-child {
+            border-bottom: none;
+        }
+
+        .suggestion-item:hover {
+            background: #f1f3f4;
+        }
+
+        .suggestion-item.active {
+            background: #e8f0fe;
+        }
+
+        .suggestion-icon {
+            width: 16px;
+            height: 16px;
+            color: #5f6368;
+            flex-shrink: 0;
+        }
+
+        .suggestion-text {
+            flex: 1;
+            font-size: 14px;
+            color: #202124;
+        }
+
+        .suggestion-type {
+            font-size: 11px;
+            color: #80868b;
+            background: #f1f3f4;
+            padding: 2px 6px;
+            border-radius: 3px;
         }
 
         /* Browser Actions */
@@ -310,17 +373,11 @@
             width: 0%;
             z-index: 1001;
             opacity: 0;
+            transition: width 0.2s ease;
         }
 
         .loading-bar.active {
             opacity: 1;
-            animation: loading 2s ease-in-out infinite;
-        }
-
-        @keyframes loading {
-            0% { width: 0%; }
-            50% { width: 70%; }
-            100% { width: 95%; }
         }
 
         .viewport {
@@ -599,7 +656,8 @@
                     <svg class="security-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
                     </svg>
-                    <input type="text" class="url-input" id="urlInput" placeholder="Search Google or type a URL" value="https://www.google.com">
+                    <input type="text" class="url-input" id="urlInput" placeholder="Search Google or type a URL" value="https://www.google.com" autocomplete="off">
+                    <div class="suggestions" id="suggestions"></div>
                 </div>
             </div>
 

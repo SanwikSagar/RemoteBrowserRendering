@@ -1,0 +1,24 @@
+FIX LINE ENDING WARNINGS - RUN THESE COMMANDS
+
+Open PowerShell or Command Prompt and run:
+
+1. Configure git globally:
+   git config --global core.autocrlf true
+   git config --global core.safecrlf false
+
+2. Reset your repository:
+   git rm --cached -r .
+   git reset --hard HEAD
+
+3. Re-add files:
+   git add .
+
+4. Commit:
+   git commit -m "fix: normalize line endings to LF"
+
+That's it! No more CRLF warnings.
+
+Explanation:
+- core.autocrlf true: Converts CRLF to LF on commit, LF to CRLF on checkout
+- core.safecrlf false: Don't warn about mixed line endings
+- The reset ensures all files are renormalized

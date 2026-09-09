@@ -128,38 +128,59 @@ wss.on('connection', (ws) => {
   console.log('🔌 New WebSocket connection');
   
   let sessionId = null;
+  let isProcessing = false;
 
   ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message.toString());
+      console.log('📨 Received message:', data.type);
       
       switch (data.type) {
         case 'start':
+          if (isProcessing) {
+            console.log('⏳ Already processing a start request');
+            return;
+          }
+          
+          isProcessing = true;
           try {
+            console.log(`🎬 Starting stream for ${data.url}`);
             sessionId = await streamManager.startStream(data.url, ws, {
-              fps: data.fps || 30,
-              quality: data.quality || 70,
+              fps: data.fps || 20,
+              quality: data.quality || 65,
               width: data.width || 1280,
               height: data.height || 720
             });
-            ws.send(JSON.stringify({ type: 'started', sessionId }));
+            
+            if (ws.readyState === 1) { // OPEN
+              ws.send(JSON.stringify({ type: 'started', sessionId }));
+              console.log(`✅ Stream started: ${sessionId}`);
+            }
           } catch (error) {
-            console.error('Failed to start stream:', error);
-            ws.send(JSON.stringify({ 
-              type: 'error', 
-              message: error.message.includes('timeout') ? 
-                'Navigation timeout - Site may be slow or blocking automated browsers' :
-                `Failed to start stream: ${error.message}`
-            }));
+            console.error('❌ Failed to start stream:', error);
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({ 
+                type: 'error', 
+                message: error.message || 'Failed to start stream'
+              }));
+            }
+          } finally {
+            isProcessing = false;
           }
           break;
           
         case 'stop':
           if (sessionId) {
-            await streamManager.stopStream(sessionId);
-            sessionId = null;
+            try {
+              await streamManager.stopStream(sessionId);
+              sessionId = null;
+              if (ws.readyState === 1) {
+                ws.send(JSON.stringify({ type: 'stopped' }));
+              }
+            } catch (error) {
+              console.error('Error stopping stream:', error);
+            }
           }
-          ws.send(JSON.stringify({ type: 'stopped' }));
           break;
           
         case 'interact':
@@ -168,17 +189,20 @@ wss.on('connection', (ws) => {
               await streamManager.handleInteraction(sessionId, data.action);
             } catch (error) {
               console.error('Interaction error:', error);
-              // Don't send error to client for minor interaction failures
             }
           }
           break;
           
         default:
-          ws.send(JSON.stringify({ type: 'error', message: 'Unknown command' }));
+          if (ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Unknown command' }));
+          }
       }
     } catch (error) {
-      console.error('WebSocket message error:', error);
-      ws.send(JSON.stringify({ type: 'error', message: error.message }));
+      console.error('❌ WebSocket message error:', error);
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'error', message: error.message }));
+      }
     }
   });
 
@@ -194,7 +218,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
+    console.error('❌ WebSocket error:', error);
   });
 });
 

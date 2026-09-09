@@ -57,13 +57,11 @@ class RemoteBrowserClient {
       this.navigate('https://www.google.com');
     });
     
-    // URL input
-    this.elements.urlInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') {
-        const url = this.elements.urlInput.value.trim();
-        this.navigate(url);
-      }
-    });
+    // URL input with optimized handling
+    this.elements.urlInput.addEventListener('input', (e) => this.handleUrlInput(e));
+    this.elements.urlInput.addEventListener('keydown', (e) => this.handleUrlKeydown(e));
+    this.elements.urlInput.addEventListener('focus', () => this.showSuggestions());
+    this.elements.urlInput.addEventListener('blur', () => setTimeout(() => this.hideSuggestions(), 200));
 
     // Settings menu
     this.elements.settingsBtn.addEventListener('click', (e) => {
@@ -88,17 +86,139 @@ class RemoteBrowserClient {
       }
     });
 
-    // Stream interactions
-    this.elements.stream.addEventListener('click', (e) => this.handleClick(e));
+    // Stream interactions - optimized for better performance
+    this.elements.stream.addEventListener('click', (e) => this.handleClick(e), { passive: false });
     this.elements.stream.addEventListener('wheel', (e) => this.handleScroll(e), { passive: false });
     this.elements.stream.addEventListener('contextmenu', (e) => e.preventDefault());
     
-    // Keyboard events
-    document.addEventListener('keydown', (e) => {
-      if (this.isStreaming && e.target !== this.elements.urlInput) {
-        this.handleKeyboard(e);
-      }
+    // Keyboard events with debouncing
+    document.addEventListener('keydown', (e) => this.handleKeyboard(e));
+  }
+
+  handleUrlInput(e) {
+    const value = e.target.value.trim();
+    
+    if (value.length === 0) {
+      this.hideSuggestions();
+      return;
+    }
+
+    this.showSuggestions();
+    this.updateSuggestions(value);
+  }
+
+  handleUrlKeydown(e) {
+    const suggestionsEl = document.getElementById('suggestions');
+    const items = suggestionsEl.querySelectorAll('.suggestion-item');
+    
+    switch (e.key) {
+      case 'Enter':
+        e.preventDefault();
+        const active = suggestionsEl.querySelector('.suggestion-item.active');
+        if (active) {
+          this.navigate(active.dataset.url);
+        } else {
+          this.navigate(this.elements.urlInput.value);
+        }
+        this.hideSuggestions();
+        break;
+        
+      case 'ArrowDown':
+        e.preventDefault();
+        this.highlightSuggestion(1);
+        break;
+        
+      case 'ArrowUp':
+        e.preventDefault();
+        this.highlightSuggestion(-1);
+        break;
+        
+      case 'Escape':
+        e.preventDefault();
+        this.hideSuggestions();
+        break;
+    }
+  }
+
+  updateSuggestions(query) {
+    const suggestionsEl = document.getElementById('suggestions');
+    const commonSites = [
+      { name: 'Google', url: 'https://www.google.com' },
+      { name: 'YouTube', url: 'https://www.youtube.com' },
+      { name: 'Wikipedia', url: 'https://www.wikipedia.org' },
+      { name: 'GitHub', url: 'https://www.github.com' },
+      { name: 'Stack Overflow', url: 'https://stackoverflow.com' },
+      { name: 'Reddit', url: 'https://www.reddit.com' },
+      { name: 'Amazon', url: 'https://www.amazon.com' },
+      { name: 'Gmail', url: 'https://mail.google.com' },
+      { name: 'Facebook', url: 'https://www.facebook.com' },
+      { name: 'Twitter', url: 'https://twitter.com' }
+    ];
+
+    const lowerQuery = query.toLowerCase();
+    
+    // Filter suggestions
+    const filtered = commonSites.filter(site => 
+      site.name.toLowerCase().includes(lowerQuery) ||
+      site.url.includes(query)
+    ).slice(0, 8);
+
+    // Add search option
+    const suggestions = [
+      {
+        name: `Search Google for "${query}"`,
+        url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+        type: 'search'
+      },
+      ...filtered.map(site => ({ ...site, type: 'site' }))
+    ];
+
+    suggestionsEl.innerHTML = suggestions.map((s, idx) => `
+      <div class="suggestion-item" data-url="${s.url}" data-index="${idx}">
+        <svg class="suggestion-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          ${s.type === 'search' ? 
+            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>' :
+            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.658 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>'
+          }
+        </svg>
+        <span class="suggestion-text">${s.name}</span>
+        <span class="suggestion-type">${s.type === 'search' ? 'Search' : 'Site'}</span>
+      </div>
+    `).join('');
+
+    // Add click handlers
+    suggestionsEl.querySelectorAll('.suggestion-item').forEach(item => {
+      item.addEventListener('click', () => {
+        this.navigate(item.dataset.url);
+        this.hideSuggestions();
+      });
     });
+  }
+
+  highlightSuggestion(direction) {
+    const suggestionsEl = document.getElementById('suggestions');
+    const items = Array.from(suggestionsEl.querySelectorAll('.suggestion-item'));
+    const active = suggestionsEl.querySelector('.suggestion-item.active');
+    
+    if (items.length === 0) return;
+
+    let nextIndex = 0;
+    if (active) {
+      const currentIndex = items.indexOf(active);
+      nextIndex = Math.max(0, Math.min(currentIndex + direction, items.length - 1));
+      active.classList.remove('active');
+    }
+
+    items[nextIndex].classList.add('active');
+    items[nextIndex].scrollIntoView({ block: 'nearest' });
+  }
+
+  showSuggestions() {
+    document.getElementById('suggestions').classList.add('active');
+  }
+
+  hideSuggestions() {
+    document.getElementById('suggestions').classList.remove('active');
   }
 
   showLoadingSpinner(text = 'Loading page...', subtext = 'This may take 10-30 seconds for heavy sites') {
@@ -112,6 +232,13 @@ class RemoteBrowserClient {
   hideLoadingSpinner() {
     this.elements.loadingSpinner.classList.remove('active');
     this.elements.loadingBar.classList.remove('active');
+  }
+
+  updateProgressBar(percentage) {
+    this.elements.loadingBar.style.width = `${Math.min(percentage, 100)}%`;
+    if (!this.elements.loadingBar.classList.contains('active')) {
+      this.elements.loadingBar.classList.add('active');
+    }
   }
 
   showConnectionOverlay(title, subtitle) {
@@ -286,14 +413,30 @@ class RemoteBrowserClient {
         this.elements.placeholder.style.display = 'none';
         this.elements.startStreamOption.style.display = 'none';
         this.elements.stopStreamOption.style.display = 'flex';
+        this.updateProgressBar(10);
         this.showLoadingSpinner('Loading page...', 'Please wait, this may take up to 30 seconds');
+        break;
+
+      case 'progress':
+        // Update progress bar based on server progress
+        this.updateProgressBar(data.progress);
+        if (data.message) {
+          this.elements.loadingText.textContent = data.message;
+        }
+        if (data.subtext) {
+          this.elements.loadingSubtext.textContent = data.subtext;
+        }
         break;
 
       case 'frame':
         this.renderFrame(data);
-        // Hide loading spinner on first frame
+        // Hide loading spinner on first frame and complete progress bar
         if (this.frameCount === 0) {
           this.hideLoadingSpinner();
+          this.updateProgressBar(100);
+          setTimeout(() => {
+            this.elements.loadingBar.classList.remove('active');
+          }, 300);
           this.elements.stream.classList.add('active');
         }
         break;
@@ -304,7 +447,6 @@ class RemoteBrowserClient {
           this.elements.urlInput.value = data.url;
           this.elements.windowTitle.textContent = data.title || '🌐 Remote Browser';
         }
-        this.hideLoadingSpinner();
         break;
 
       case 'stopped':
@@ -315,6 +457,8 @@ class RemoteBrowserClient {
       case 'error':
         console.error('Server error:', data.message);
         this.hideLoadingSpinner();
+        this.updateProgressBar(0);
+        this.elements.loadingBar.classList.remove('active');
         this.showNotification(`❌ ${data.message}`, 'error');
         break;
     }
