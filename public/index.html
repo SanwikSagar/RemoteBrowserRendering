@@ -4,7 +4,26 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Remote Browser - Full Featured</title>
-    <style>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌐 Remote Browser</h1>
+            <p class="subtitle">Full-featured browser with 60 FPS streaming • Click, scroll, type, and navigate</p>
+        </div>
+
+        <div class="browser-content">
+            <!-- Tabs -->
+            <div class="tabs-container" id="tabsContainer">
+                <div class="tab active" data-tab-id="1">
+                    <span class="tab-title">New Tab</span>
+                    <span class="tab-close">×</span>
+                </div>
+                <button class="new-tab-btn" id="newTabBtn" title="New Tab">+</button>
+            </div>
+
+            <!-- Browser Controls -->
             <div class="browser-bar">
                 <div class="nav-buttons">
                     <button class="nav-btn" id="backBtn" title="Back (Alt+Left)" disabled>
