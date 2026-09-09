@@ -9,15 +9,15 @@ export class StreamManager {
 
   async startStream(url, ws, options = {}) {
     const sessionId = randomUUID();
-    const fps = Math.min(options.fps || 20, 30);
+    const fps = Math.min(options.fps || 30, 60);
     const frameInterval = 1000 / fps;
-    const quality = Math.min(Math.max(options.quality || 60, 50), 90);
-    // Use client-provided dimensions for responsive viewport
+    const quality = Math.min(Math.max(options.quality || 80, 60), 95);
     const width = options.width || 1280;
     const height = options.height || 720;
+    const isMobile = options.isMobile || false;
 
-    console.log(`📹 Starting stream session ${sessionId} for ${url}`);
-    console.log(`⚙️  Settings: ${fps} FPS, ${quality}% quality, ${width}x${height}`);
+    console.log(`Starting stream session ${sessionId} for ${url}`);
+    console.log(`Settings: ${fps} FPS, ${quality}% quality, ${width}x${height}, Mobile: ${isMobile}`);
 
     const sendProgress = (progress, message, subtext) => {
       if (ws.readyState === 1) {
@@ -34,99 +34,75 @@ export class StreamManager {
     let page = null;
 
     try {
-      sendProgress(5, 'Acquiring browser...', 'Initializing Puppeteer');
+      sendProgress(5, 'Acquiring browser...', 'Initializing');
       browser = await this.browserPool.acquire();
-      console.log('✅ Browser acquired');
       
       sendProgress(10, 'Creating page...', 'Setting up viewport');
       page = await browser.newPage();
-      console.log('✅ Page created');
 
-      // Set viewport
       await page.setViewport({
         width,
         height,
-        deviceScaleFactor: 1
+        deviceScaleFactor: isMobile ? 2 : 1,
+        isMobile: isMobile,
+        hasTouch: isMobile,
+        isLandscape: width > height
       });
-      console.log('✅ Viewport set');
 
-      // Simple resource blocking for memory efficiency
-      sendProgress(15, 'Configuring resources...', 'Blocking ads and trackers');
+      const userAgent = isMobile 
+        ? 'Mozilla/5.0 (Linux; Android 10; Pixel 4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+        : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      
+      await page.setUserAgent(userAgent);
+
+      sendProgress(15, 'Configuring resources...', 'Optimizing performance');
       await page.setRequestInterception(true);
       
       page.on('request', (request) => {
         const resourceType = request.resourceType();
         const requestUrl = request.url();
         
-        // Aggressive blocking to save memory
         if (resourceType === 'media' || 
             resourceType === 'font' || 
-            resourceType === 'image' && requestUrl.includes('ads') ||
-            resourceType === 'stylesheet' && requestUrl.includes('analytics')) {
-          request.abort().catch(() => {});
-        } else if (requestUrl.includes('doubleclick') || 
-                   requestUrl.includes('analytics') || 
-                   requestUrl.includes('ads') ||
-                   requestUrl.includes('tracking') ||
-                   requestUrl.includes('facebook.com/tr') ||
-                   requestUrl.includes('google-analytics')) {
+            resourceType === 'websocket' ||
+            requestUrl.includes('doubleclick') || 
+            requestUrl.includes('analytics') || 
+            requestUrl.includes('ads') ||
+            requestUrl.includes('tracking') ||
+            requestUrl.includes('facebook.com/tr') ||
+            requestUrl.includes('google-analytics')) {
           request.abort().catch(() => {});
         } else {
           request.continue().catch(() => {});
         }
       });
-      
-      console.log('✅ Request interception configured');
 
-      // Disable JavaScript features that consume memory
       await page.evaluateOnNewDocument(() => {
-        // Disable service workers
         delete window.navigator.serviceWorker;
-        
-        // Disable notifications
         window.Notification = undefined;
-        
-        // Disable Web Workers
         window.Worker = undefined;
         window.SharedWorker = undefined;
-        
-        // Disable WebRTC
         window.RTCPeerConnection = undefined;
         window.webkitRTCPeerConnection = undefined;
-        window.mozRTCPeerConnection = undefined;
-        
-        // Disable IndexedDB
         window.indexedDB = undefined;
-        
-        console.log('Memory optimizations applied');
       });
 
-      // Set user agent
       sendProgress(20, 'Setting user agent...', 'Preparing browser');
-      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-      // Navigate with timeout
       sendProgress(30, 'Navigating to page...', `Loading ${url}`);
-      console.log(`🌐 Navigating to ${url}...`);
+      
       try {
         await page.goto(url, { 
           waitUntil: 'domcontentloaded',
           timeout: 30000
         });
-        console.log('✅ Navigation successful');
         sendProgress(70, 'Page loaded', 'Processing content');
       } catch (navError) {
-        console.warn(`⚠️ Navigation warning: ${navError.message}`);
-        sendProgress(70, 'Page partially loaded', 'Continuing anyway...');
-        // Continue anyway - page might have partially loaded
+        sendProgress(70, 'Page partially loaded', 'Continuing...');
       }
 
-      // Wait for page to stabilize
       await new Promise(resolve => setTimeout(resolve, 500));
-      console.log('✅ Page stabilized');
       sendProgress(80, 'Stabilizing page...', 'Nearly ready');
 
-      // Send initial page info
       sendProgress(85, 'Sending page info...', 'Almost ready');
       try {
         const currentUrl = page.url();
@@ -139,9 +115,8 @@ export class StreamManager {
             title: title
           }));
         }
-        console.log('✅ Page info sent');
       } catch (error) {
-        console.warn('⚠️ Failed to get page info:', error.message);
+        console.warn('Failed to get page info:', error.message);
       }
 
       sendProgress(90, 'Starting stream...', 'Capturing frames');
@@ -150,12 +125,10 @@ export class StreamManager {
       let frameCount = 0;
       let errorCount = 0;
       const maxErrors = 5;
-      let lastScreenshot = null; // Track for memory cleanup
+      let lastScreenshot = null;
 
-      // Streaming loop
       const streamLoop = async () => {
         if (!isStreaming) {
-          // Clean up on exit
           lastScreenshot = null;
           return;
         }
@@ -163,70 +136,60 @@ export class StreamManager {
         const startTime = Date.now();
 
         try {
-          // Check if page is still alive
           if (page.isClosed()) {
-            console.log(`Session ${sessionId} page closed`);
             isStreaming = false;
             lastScreenshot = null;
             return;
           }
 
-          // Capture screenshot
           const screenshot = await page.screenshot({
-            type: 'jpeg',
-            quality,
+            type: 'png',
             encoding: 'binary',
-            optimizeForSpeed: true // Prioritize speed over size
+            optimizeForSpeed: true
           });
 
-          // Clear previous screenshot from memory
           if (lastScreenshot) {
             lastScreenshot = null;
           }
 
-          // Compress with Sharp - HIGH QUALITY, FAST compression
-          const optimizedJpeg = await sharp(screenshot)
+          const optimizedImage = await sharp(screenshot)
             .resize(width, height, {
               fit: 'inside',
               withoutEnlargement: true,
-              fastShrinkOnLoad: true // Performance boost
+              fastShrinkOnLoad: true,
+              kernel: 'nearest'
             })
-            .jpeg({ 
+            .webp({
               quality,
-              mozjpeg: true,
-              chromaSubsampling: '4:4:4',  // Full chroma for quality
-              trellisQuantisation: true,    // Better quality
-              overshootDeringing: true,     // Reduce artifacts
-              optimizeScans: true,          // Optimize progressive scans
-              quantisationTable: 3          // Use optimal quantisation
+              effort: 0,
+              lossless: false,
+              nearLossless: false,
+              smartSubsample: true,
+              preset: 'picture'
             })
             .toBuffer();
 
           lastScreenshot = screenshot;
 
-          // Send frame
           if (ws.readyState === 1) {
             ws.send(JSON.stringify({
               type: 'frame',
               sessionId,
-              frame: optimizedJpeg.toString('base64'),
+              frame: optimizedImage.toString('base64'),
               frameNumber: frameCount++,
-              timestamp: startTime
+              timestamp: startTime,
+              format: 'webp'
             }));
             
-            errorCount = 0; // Reset on success
+            errorCount = 0;
           }
 
-          // Aggressive memory cleanup every 50 frames
-          if (frameCount % 50 === 0) {
-            if (global.gc) {
-              global.gc();
-            }
+          if (frameCount % 50 === 0 && global.gc) {
+            global.gc();
           }
 
-          // Schedule next frame
           const processingTime = Date.now() - startTime;
-          const nextDelay = Math.max(10, frameInterval - processingTime);
+          const nextDelay = Math.max(5, frameInterval - processingTime);
 
           if (isStreaming) {
             setTimeout(streamLoop, nextDelay);
@@ -237,13 +200,12 @@ export class StreamManager {
           errorCount++;
           
           if (error.message.includes('closed')) {
-            console.log(`Session ${sessionId} closed`);
             isStreaming = false;
             lastScreenshot = null;
             return;
           }
           
-          console.error(`❌ Streaming error (${errorCount}/${maxErrors}):`, error.message);
+          console.error(`Streaming error (${errorCount}/${maxErrors}):`, error.message);
           
           if (errorCount >= maxErrors) {
             console.error(`Too many errors, stopping stream ${sessionId}`);
@@ -258,19 +220,17 @@ export class StreamManager {
             return;
           }
           
-          // Retry with backoff
           if (isStreaming) {
             setTimeout(streamLoop, frameInterval * 2);
           }
         }
       };
 
-      // Start streaming
-      console.log('🎬 Starting stream loop...');
-      sendProgress(95, 'Streaming started!', 'Ready to stream');
+      sendProgress(95, 'Streaming started', 'Ready');
+      sendProgress(100, 'Stream ready', 'Connected');
+      
       streamLoop();
 
-      // Store session
       this.sessions.set(sessionId, {
         browser,
         page,
@@ -278,17 +238,13 @@ export class StreamManager {
         stop: () => { isStreaming = false; }
       });
 
-      console.log(`✅ Stream ${sessionId} fully initialized`);
-      sendProgress(100, 'Stream ready!', 'Enjoy your browsing');
       return sessionId;
 
     } catch (error) {
-      console.error(`❌ Failed to start stream: ${error.message}`);
-      console.error(error.stack);
+      console.error(`Failed to start stream: ${error.message}`);
       
       sendProgress(0, 'Stream failed', error.message);
       
-      // Cleanup on failure
       if (page) {
         try {
           await page.close();
@@ -307,11 +263,8 @@ export class StreamManager {
   async stopStream(sessionId) {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      console.warn(`Session ${sessionId} not found`);
       return;
     }
-
-    console.log(`🛑 Stopping stream session ${sessionId}`);
 
     session.stop();
     
@@ -323,14 +276,11 @@ export class StreamManager {
 
     this.browserPool.release(session.browser);
     this.sessions.delete(sessionId);
-    
-    console.log(`✅ Session ${sessionId} stopped`);
   }
 
   async handleInteraction(sessionId, action) {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      console.warn(`Session ${sessionId} not found for interaction`);
       return;
     }
 
@@ -342,7 +292,6 @@ export class StreamManager {
           await page.mouse.click(action.x, action.y, {
             button: action.button === 'right' ? 'right' : 'left'
           });
-          console.log(`🖱️ Click at (${action.x}, ${action.y})`);
           break;
 
         case 'scroll':
@@ -374,7 +323,6 @@ export class StreamManager {
             await new Promise(resolve => setTimeout(resolve, 500));
           }
           
-          // Send updated URL
           try {
             const currentUrl = page.url();
             const title = await page.title();
@@ -401,9 +349,7 @@ export class StreamManager {
   }
 
   async cleanup() {
-    console.log('🧹 Cleaning up all streaming sessions...');
     const sessionIds = Array.from(this.sessions.keys());
     await Promise.all(sessionIds.map(id => this.stopStream(id)));
-    console.log('✅ All sessions cleaned up');
   }
 }

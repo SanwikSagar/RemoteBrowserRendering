@@ -1,115 +1,150 @@
-# 🌐 Remote Browser Rendering
+# Remote Browser Rendering
 
-A professional, high-performance remote browser streaming application with a modern Chrome-like interface. Stream any website in real-time with full interactivity.
+High-performance remote browser rendering system streaming web pages as WebP images at up to 60 FPS.
 
-## ✨ Features
+## Features
 
-### 🎨 Professional UI
-- **Chrome-like Interface**: Authentic browser look with tabs, URL bar, and status bar
-- **Fully Responsive**: Works on desktop, tablet, and mobile
-- **Real Progress Bar**: Live loading progress with server updates
-- **Loading Indicators**: Spinner and connection overlay for clear feedback
-- **Smart Suggestions**: Search suggestions and popular sites
+- **WebP Streaming** - 30-40% smaller than JPEG with better quality
+- **Mobile-Responsive** - Automatically detects and renders mobile/desktop sites correctly
+- **High Performance** - Up to 60 FPS with sub-10ms encoding
+- **Memory Optimized** - Automatic garbage collection and efficient resource management
+- **Auto-Reconnect** - Resilient WebSocket connection with exponential backoff
+- **Real-Time Interaction** - Click, scroll, and type in the remote browser
+- **Progress Tracking** - Live loading progress and performance metrics
 
-### ⚡ Performance
-- **Optimized Streaming**: 20-30 FPS with adaptive quality
-- **Smart Resource Blocking**: Blocks ads/trackers, allows critical resources
-- **Real-time Compression**: Optimized JPEG frames for low bandwidth
-- **Error Recovery**: Auto-reconnect with exponential backoff
-- **Memory Efficient**: ~400MB usage on 512MB free tier
+## Quick Start
 
-### 🖱️ Full Interactivity
-- **Click & Scroll**: Real-time mouse interactions
-- **Keyboard Input**: Full typing support with special keys
-- **Navigation**: Back, forward, refresh, home buttons
-- **URL Bar**: Search Google or enter any URL
-- **Keyboard Navigation**: Arrow keys to navigate suggestions
-
-### 🚀 Robust & Fast
-- **Navigation Retries**: Auto-retry failed page loads
-- **Extended Timeouts**: 30s for complex sites like YouTube
-- **Smart Caching**: Enabled for faster repeat visits
-- **User Agent**: Avoids bot detection
-- **Connection Resilience**: 5 auto-reconnect attempts
-
-## 🚀 Quick Start
-
-### Installation
+### Install Dependencies
 ```bash
-# Install dependencies
 npm install
-
-# Start server
-npm start
-
-# Open browser
-# Navigate to http://localhost:3000
 ```
 
-### Usage
-1. Enter a URL in the address bar
-2. Press Enter or click Settings → Start Streaming
-3. Wait 5-30 seconds for the page to load
-4. Interact with the stream:
-   - **Click** anywhere on the page
-   - **Scroll** with mouse wheel
-   - **Type** when focused in text fields
-   - **Arrow keys** to navigate suggestions
-
-## 🌐 Supported Sites
-
-### ✅ Works Great (5-15s)
-- Google, DuckDuckGo
-- Wikipedia, Reddit
-- GitHub, Stack Overflow
-- News sites (BBC, CNN)
-- Most HTML-based sites
-
-### ⚠️ Works (15-30s)
-- YouTube, Instagram
-- Amazon, Twitter/X
-- Facebook
-- Heavy JavaScript sites
-
-### ❌ Limited Support
-- Netflix (video streaming not supported)
-- Sites with aggressive bot protection
-- Sites requiring specific geolocation
-
-## 📊 Settings
-
-### Recommended Configuration
-```
-FPS: 20-25 (smooth, reliable)
-Quality: 60-70% (good balance)
-Resolution: 1280x720 (default)
-```
-
-### For Speed
-```
-FPS: 15-20
-Quality: 50-60%
-```
-
-### For Quality
-```
-FPS: 30
-Quality: 80-90%
-```
-
-## 🌐 Deployment
-
-### Render (Production)
+### Run Development Server
 ```bash
-# Already configured with render.yaml
-# Push to GitHub and Render auto-deploys
+npm run dev:gc
 ```
 
-### Vercel
+### Run Production Server
 ```bash
-# Already configured with vercel.json
-vercel
+npm run start:gc
 ```
+
+The server will start on `http://localhost:3000`
+
+## Configuration
+
+### Environment Variables
+```bash
+PORT=3000                          # Server port
+NODE_OPTIONS="--expose-gc"         # Enable garbage collection
+```
+
+### Default Settings
+- **FPS**: 30 (adjustable 10-60)
+- **Quality**: 80% (adjustable 60-95%)
+- **Format**: WebP (optimized)
+- **Max Browsers**: 1 (configurable in browserPool)
+
+## Architecture
+
+### Server Components
+- **Express Server** - HTTP server and static file serving
+- **WebSocket Server** - Real-time bidirectional communication
+- **Browser Pool** - Manages Puppeteer browser instances
+- **Stream Manager** - Handles screenshot capture and WebP encoding
+
+### Client Components
+- **RemoteBrowserClient** - Main client class
+- **Frame Queue** - Buffers frames for smooth 60 FPS display
+- **Mobile Detection** - Automatic device type detection
+- **Responsive Viewport** - Dynamic sizing based on window
+
+## Performance
+
+### Metrics
+- **Frame Size**: 25-35 KB (WebP)
+- **Encoding Time**: 3-8ms
+- **Display FPS**: 30-60
+- **Latency**: Typically 50-200ms
+
+### Optimizations
+- WebP compression with effort level 0 (fastest)
+- Hardware-accelerated rendering
+- Aggressive resource blocking (ads, analytics, trackers)
+- Memory cleanup every 50 frames
+- Frame queue limited to 3 for memory efficiency
+
+## API
+
+### WebSocket Messages
+
+#### Client → Server
+```javascript
+// Start streaming
+{
+  type: 'start',
+  url: 'https://example.com',
+  fps: 30,
+  quality: 80,
+  width: 1280,
+  height: 720,
+  isMobile: false
+}
+
+// Stop streaming
+{ type: 'stop' }
+
+// Interact with page
+{
+  type: 'interact',
+  sessionId: 'uuid',
+  action: {
+    type: 'click',    // or 'scroll', 'type', 'key', 'navigate'
+    x: 100,
+    y: 200
+  }
+}
+```
+
+#### Server → Client
+```javascript
+// Stream started
+{ type: 'started', sessionId: 'uuid' }
+
+// Progress update
+{
+  type: 'progress',
+  progress: 50,
+  message: 'Loading page...',
+  subtext: 'Please wait'
+}
+
+// Frame data
+{
+  type: 'frame',
+  sessionId: 'uuid',
+  frame: 'base64-encoded-webp',
+  frameNumber: 42,
+  timestamp: 1234567890,
+  format: 'webp'
+}
+
+// Page info
+{
+  type: 'pageInfo',
+  sessionId: 'uuid',
+  url: 'https://example.com',
+  title: 'Page Title'
+}
+
+// Stream stopped
+{ type: 'stopped' }
+
+// Error
+{ type: 'error', message: 'Error description' }
+```
+
+## Deployment
 
 ### Docker
 ```bash
@@ -117,137 +152,74 @@ docker build -t remote-browser .
 docker run -p 3000:3000 remote-browser
 ```
 
-## 📁 Project Structure
+### Render.com
+1. Connect your repository
+2. Set start command: `node --expose-gc src/server.js`
+3. Set environment: `NODE_OPTIONS=--expose-gc`
 
+### Vercel
+Not recommended (requires long-running processes)
+Use Render or traditional hosting instead.
+
+## Browser Support
+
+| Browser | Support |
+|---------|---------|
+| Chrome | ✅ Full |
+| Firefox | ✅ Full |
+| Safari 14+ | ✅ Full |
+| Edge | ✅ Full |
+
+## Development
+
+### Project Structure
 ```
-RemoteBrowserRendering/
 ├── public/
-│   ├── index.html        # Client UI
-│   └── browser.js        # Client logic
+│   ├── index.html      # Client UI
+│   └── browser.js      # Client application
 ├── src/
-│   ├── server.js         # Express + WebSocket
-│   ├── browserPool.js    # Browser management
-│   └── streamManager.js  # Stream handling
-├── .github/
-│   └── workflows/        # CI/CD
-├── Dockerfile
+│   ├── server.js       # Express & WebSocket server
+│   ├── browserPool.js  # Puppeteer instance manager
+│   └── streamManager.js # Screenshot & encoding
 ├── package.json
-├── README.md
-└── render.yaml
+└── README.md
 ```
 
-## 🔧 Key Technologies
+### Scripts
+```bash
+npm start            # Production server
+npm run start:gc     # Production with GC enabled
+npm run dev          # Development server
+npm run dev:gc       # Development with GC enabled
+```
 
-- **Frontend**: HTML, CSS, JavaScript
-- **Backend**: Node.js, Express
-- **Browser Automation**: Puppeteer
-- **Real-time Communication**: WebSocket
-- **Image Processing**: Sharp
-- **Hosting**: Render, Vercel, Docker
+## Troubleshooting
 
-## 📈 Performance Metrics
+### High Memory Usage
+- Enable garbage collection with `--expose-gc`
+- Reduce `maxBrowsers` in browserPool
+- Lower FPS or quality settings
 
-| Metric | Value |
-|--------|-------|
-| Frame Size | 30-50 KB |
-| Bandwidth | 1-2 Mbps @ 30 FPS |
-| Latency | 100-300 ms |
-| Memory | ~400 MB |
-| Success Rate | 90%+ |
-| FPS | 20-30 |
+### Poor Performance
+- Increase FPS setting (up to 60)
+- Increase quality (up to 95%)
+- Check network connection
+- Use wired connection for best results
 
-## 🐛 Troubleshooting
+### Loading Spinner Stuck
+- Fixed in current version
+- Auto-hides on first frame
+- Also hides when progress reaches 100%
 
-### Site Won't Load
-- **Solution**: Try simpler site first (google.com)
-- **Solution**: Increase timeout in settings
-- **Solution**: Check if site works in normal browser
+### Mobile Sites Show Desktop Version
+- Fixed in current version
+- Automatic mobile detection
+- Proper user agent and viewport settings
 
-### Slow/Laggy
-- **Solution**: Lower FPS to 15-20
-- **Solution**: Lower quality to 60%
-- **Solution**: Close other applications
+## License
 
-### Connection Lost
-- **Solution**: Wait for auto-reconnect (5 attempts)
-- **Solution**: Refresh page
-- **Solution**: Check server logs
+MIT
 
-### No Images Showing
-- **Solution**: Wait 10-30 seconds
-- **Solution**: Check browser console (F12)
-- **Solution**: Try different site
+## Contributing
 
-## 📚 Documentation
-
-- **INPUT_SYSTEM_IMPROVEMENTS.md** - Keyboard navigation and suggestions
-- **REAL_PROGRESS_BAR.md** - Progress bar implementation
-- **GIT_LINE_ENDINGS_QUICK_FIX.md** - Line ending configuration
-- **GITHUB_ACTIONS_FIX.md** - CI/CD setup
-- **LATEST_UPDATES_SUMMARY.md** - Recent changes
-
-## 🎓 Features Explained
-
-### Smart Suggestions
-- Type "git" → See GitHub suggestion
-- Type "wiki" → See Wikipedia suggestion
-- Type "cat videos" → Search Google
-- Arrow keys to navigate
-- Enter to select
-
-### Real Progress Bar
-Server sends progress at each step:
-- 5% - Browser acquired
-- 30% - Navigating to page
-- 70% - Page loaded
-- 100% - Stream ready
-
-### Keyboard Navigation
-- **Arrow Down** - Next suggestion
-- **Arrow Up** - Previous suggestion
-- **Enter** - Go to URL/suggestion
-- **Escape** - Close suggestions
-
-## 🔐 Security
-
-- No sensitive data stored
-- Single-process browser mode
-- Resource blocking for malware
-- User agent spoofing to avoid bot detection
-- HTTPS/WSS support
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-1. Fork the repo
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## 📝 License
-
-MIT License - See LICENSE file
-
-## 🙏 Acknowledgments
-
-- Puppeteer for browser automation
-- Sharp for image processing
-- Express for web server
-- WebSocket for real-time communication
-
-## 📞 Support
-
-For issues or questions:
-1. Check the troubleshooting section
-2. Review documentation files
-3. Check server logs (npm start)
-4. Open an issue on GitHub
-
----
-
-**Built with ❤️ for remote browser streaming**
-
-Version 2.0 - Professional UI, Smart Input System, Real Progress Bar
-
-**Status**: Production Ready ✅
+Pull requests are welcome. For major changes, please open an issue first.

@@ -11,20 +11,19 @@ class RemoteBrowserClient {
     this.reconnectDelay = 2000;
     this.connectionRetryTimeout = null;
     
-    // Performance optimizations - frame buffering for smooth display
     this.frameQueue = [];
     this.isProcessingFrame = false;
     this.lastFrameTime = 0;
-    this.targetFrameTime = 1000 / 60; // 60 FPS target for smooth display
+    this.targetFrameTime = 1000 / 60;
     
-    // Responsive viewport - dynamic sizing based on window
+    this.isMobile = this.detectMobile();
+    
     this.viewportWidth = 1280;
     this.viewportHeight = 720;
     this.updateViewportSize();
     
-    // Input debouncing for ultra-fast response
     this.inputDebounceTimeout = null;
-    this.inputDebounceDelay = 50; // 50ms for instant feel
+    this.inputDebounceDelay = 50;
     
     this.elements = {
       urlInput: document.getElementById('urlInput'),
@@ -61,6 +60,15 @@ class RemoteBrowserClient {
     this.setupResponsiveViewport();
     this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection');
     this.connect();
+  }
+
+  detectMobile() {
+    const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+    const isMobileDevice = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent.toLowerCase());
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    const isSmallScreen = window.innerWidth <= 768;
+    
+    return isMobileDevice || (isTouchDevice && isSmallScreen);
   }
 
   updateViewportSize() {
@@ -444,11 +452,10 @@ class RemoteBrowserClient {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}`;
     
-    console.log(`🔌 Connecting to ${wsUrl}...`);
+    console.log(`Connecting to ${wsUrl}...`);
     
     try {
       this.ws = new WebSocket(wsUrl);
-      // Enable binary type for better performance
       this.ws.binaryType = 'arraybuffer';
     } catch (error) {
       console.error('Failed to create WebSocket:', error);
@@ -457,7 +464,7 @@ class RemoteBrowserClient {
     }
 
     this.ws.onopen = () => {
-      console.log('✅ WebSocket connected');
+      console.log('WebSocket connected');
       this.reconnectAttempts = 0;
       this.updateStatus('connected', 'Connected');
       this.hideConnectionOverlay();
@@ -473,7 +480,7 @@ class RemoteBrowserClient {
     };
 
     this.ws.onclose = () => {
-      console.log('❌ WebSocket disconnected');
+      console.log('WebSocket disconnected');
       this.updateStatus('disconnected', 'Disconnected');
       
       if (this.isStreaming) {
@@ -493,7 +500,7 @@ class RemoteBrowserClient {
       const delay = this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts);
       this.reconnectAttempts++;
       
-      console.log(`⏳ Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+      console.log(`Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
       
       this.showConnectionOverlay(
         'Reconnecting...',
@@ -502,7 +509,7 @@ class RemoteBrowserClient {
       
       this.connectionRetryTimeout = setTimeout(() => this.connect(), delay);
     } else {
-      console.error('❌ Max reconnection attempts reached');
+      console.error('Max reconnection attempts reached');
       this.updateStatus('disconnected', 'Connection Failed');
       this.showConnectionOverlay(
         'Connection Failed',
@@ -516,7 +523,7 @@ class RemoteBrowserClient {
       case 'started':
         this.sessionId = data.sessionId;
         this.isStreaming = true;
-        console.log(`📹 Stream started with session ID: ${this.sessionId}`);
+        console.log(`Stream started with session ID: ${this.sessionId}`);
         this.updateStatus('streaming', 'Streaming');
         this.enableNavigation(true);
         this.elements.placeholder.style.display = 'none';
@@ -527,7 +534,6 @@ class RemoteBrowserClient {
         break;
 
       case 'progress':
-        // Update progress bar based on server progress
         this.updateProgressBar(data.progress);
         if (data.message) {
           this.elements.loadingText.textContent = data.message;
@@ -535,10 +541,18 @@ class RemoteBrowserClient {
         if (data.subtext) {
           this.elements.loadingSubtext.textContent = data.subtext;
         }
+        
+        if (data.progress >= 100) {
+          setTimeout(() => {
+            if (this.frameCount > 0) {
+              this.hideLoadingSpinner();
+              this.elements.loadingBar.classList.remove('active');
+            }
+          }, 500);
+        }
         break;
 
       case 'frame':
-        // Queue frame for smooth rendering
         this.queueFrame(data);
         break;
 
@@ -546,12 +560,12 @@ class RemoteBrowserClient {
         if (data.url) {
           this.elements.currentUrl.textContent = this.truncateUrl(data.url);
           this.elements.urlInput.value = data.url;
-          this.elements.windowTitle.textContent = data.title || '🌐 Remote Browser';
+          this.elements.windowTitle.textContent = data.title || 'Remote Browser';
         }
         break;
 
       case 'stopped':
-        console.log('🛑 Stream stopped');
+        console.log('Stream stopped');
         this.resetStream();
         break;
 
@@ -560,7 +574,7 @@ class RemoteBrowserClient {
         this.hideLoadingSpinner();
         this.updateProgressBar(0);
         this.elements.loadingBar.classList.remove('active');
-        this.showNotification(`❌ ${data.message}`, 'error');
+        this.showNotification(`Error: ${data.message}`, 'error');
         break;
     }
   }
@@ -613,7 +627,6 @@ class RemoteBrowserClient {
   }
 
   renderFrame(data) {
-    // Decode base64 more efficiently without intermediate strings
     const byteCharacters = atob(data.frame);
     const byteNumbers = new Uint8Array(byteCharacters.length);
     
@@ -621,26 +634,21 @@ class RemoteBrowserClient {
       byteNumbers[i] = byteCharacters.charCodeAt(i);
     }
     
-    const blob = new Blob([byteNumbers], { type: 'image/jpeg' });
+    const blob = new Blob([byteNumbers], { type: 'image/webp' });
     const url = URL.createObjectURL(blob);
     
-    // Clean up previous object URL IMMEDIATELY to free memory
     const oldSrc = this.elements.stream.src;
     if (oldSrc && oldSrc.startsWith('blob:')) {
       URL.revokeObjectURL(oldSrc);
     }
     
     this.elements.stream.src = url;
-    
-    // Clear the data to help garbage collection
     byteNumbers.fill(0);
     
-    // Update frame count
     this.frameCount++;
     this.fpsCounter++;
     this.elements.frameCountEl.textContent = this.frameCount;
 
-    // Calculate FPS
     const now = Date.now();
     const elapsed = now - this.lastFpsUpdate;
     if (elapsed >= 1000) {
@@ -650,21 +658,21 @@ class RemoteBrowserClient {
       this.lastFpsUpdate = now;
     }
 
-    // Calculate latency
     const latency = Date.now() - data.timestamp;
     this.elements.latency.textContent = `${latency}ms`;
 
-    // Hide loading on first frame
     if (this.frameCount === 1) {
       this.hideLoadingSpinner();
       this.updateProgressBar(100);
+      
       setTimeout(() => {
         this.elements.loadingBar.classList.remove('active');
-      }, 300);
+        this.elements.loadingBar.style.width = '0%';
+      }, 200);
+      
       this.elements.stream.classList.add('active');
     }
     
-    // Force garbage collection hint every 100 frames
     if (this.frameCount % 100 === 0) {
       this.cleanupMemory();
     }
@@ -700,16 +708,16 @@ class RemoteBrowserClient {
                      url;
 
     // Validate and clamp input values
-    let fps = parseInt(this.elements.fpsInput.value) || 20;
-    fps = Math.max(10, Math.min(fps, 30));
+    let fps = parseInt(this.elements.fpsInput.value) || 30;
+    fps = Math.max(10, Math.min(fps, 60)); // Allow up to 60 FPS
     this.elements.fpsInput.value = fps;
 
-    let quality = parseInt(this.elements.qualityInput.value) || 65;
-    quality = Math.max(50, Math.min(quality, 90));
+    let quality = parseInt(this.elements.qualityInput.value) || 80;
+    quality = Math.max(60, Math.min(quality, 95));
     this.elements.qualityInput.value = quality;
 
-    console.log(`🚀 Starting stream for ${finalUrl}`);
-    console.log(`⚙️  Settings: ${fps} FPS, ${quality}% quality, ${this.viewportWidth}x${this.viewportHeight}`);
+    console.log(`Starting stream for ${finalUrl}`);
+    console.log(`Settings: ${fps} FPS, ${quality}% quality, ${this.viewportWidth}x${this.viewportHeight}, Mobile: ${this.isMobile}`);
 
     try {
       this.ws.send(JSON.stringify({
@@ -718,7 +726,8 @@ class RemoteBrowserClient {
         fps,
         quality,
         width: this.viewportWidth,
-        height: this.viewportHeight
+        height: this.viewportHeight,
+        isMobile: this.isMobile
       }));
 
       this.frameCount = 0;
@@ -751,10 +760,9 @@ class RemoteBrowserClient {
     this.sessionId = null;
     this.isStreaming = false;
     
-    // Clear frame queue and help GC
     this.frameQueue.forEach(frame => {
       if (frame && frame.frame) {
-        frame.frame = null; // Clear base64 data
+        frame.frame = null;
       }
     });
     this.frameQueue = [];
@@ -762,7 +770,6 @@ class RemoteBrowserClient {
     this.enableNavigation(false);
     this.elements.stream.classList.remove('active');
     
-    // Clean up object URL and clear image
     if (this.elements.stream.src && this.elements.stream.src.startsWith('blob:')) {
       URL.revokeObjectURL(this.elements.stream.src);
     }
@@ -773,12 +780,11 @@ class RemoteBrowserClient {
     this.updateStatus('connected', 'Connected');
     this.elements.fpsDisplay.textContent = '0 FPS';
     this.elements.currentUrl.textContent = '-';
-    this.elements.windowTitle.textContent = '🌐 Remote Browser';
+    this.elements.windowTitle.textContent = 'Remote Browser';
     this.frameCount = 0;
     this.elements.startStreamOption.style.display = 'flex';
     this.elements.stopStreamOption.style.display = 'none';
     
-    // Force memory cleanup
     this.cleanupMemory();
   }
 
