@@ -140,6 +140,10 @@ export class StreamManager {
       let errorCount = 0;
       const maxErrors = 5;
 
+      // Calculate downscaled dimensions for server processing
+      const downscaleWidth = Math.round(width * 0.6);   // 60% size for extreme compression
+      const downscaleHeight = Math.round(height * 0.6);
+
       const streamLoop = async () => {
         if (!isStreaming) {
           return;
@@ -153,33 +157,31 @@ export class StreamManager {
             return;
           }
 
-          // Capture screenshot as PNG (best quality source)
+          // Ultra-fast screenshot at reduced resolution
           const screenshot = await page.screenshot({
-            type: 'png',
+            type: 'jpeg',
+            quality: 60,                    // Reasonable JPEG quality
             encoding: 'binary',
-            optimizeForSpeed: true
+            optimizeForSpeed: true,
+            clip: {
+              x: 0,
+              y: 0,
+              width: width,
+              height: height
+            }
           });
 
-          // Extreme compression pipeline for ~5KB frames
-          // Strategy: Reduce resolution (75%) + aggressive WebP compression (quality 45)
-          // Result: 1280x720 → 960x540 @ Q45 ≈ 5-8 KB per frame
+          // Minimal server-side processing - just downscale and compress
           const optimizedImage = await sharp(screenshot)
-            // First: aggressive downscale (reduce pixel count)
-            .resize(Math.round(width * 0.75), Math.round(height * 0.75), {
-              fit: 'fill',
-              kernel: 'nearest',           // Fastest, no interpolation
+            .resize(downscaleWidth, downscaleHeight, {
+              kernel: 'cubic',              // Better quality for upscaling
               fastShrinkOnLoad: true
             })
-            // Second: convert to WebP with extreme compression
             .webp({
-              quality: 45,                  // Very aggressive quality (was 75)
+              quality: 50,                  // Balanced quality
               effort: 0,                    // Fastest encoding
-              lossless: false,
-              nearLossless: false,
               smartSubsample: true,
-              preset: 'picture',
-              alphaQuality: 0,              // Minimal alpha
-              reductionEffort: 0            // Skip additional optimization passes
+              preset: 'picture'
             })
             .toBuffer();
 
@@ -188,16 +190,20 @@ export class StreamManager {
             
             // Log frame size every 30 frames for monitoring
             if (frameCount % 30 === 0) {
-              console.log(`Frame ${frameCount}: ${frameSize} KB (target: 5-8 KB)`);
+              console.log(`Frame ${frameCount}: ${frameSize} KB | ${downscaleWidth}×${downscaleHeight} → ${width}×${height}`);
             }
             
-            // Send with minimal JSON overhead
+            // Send with dimensions for client-side upscaling
             ws.send(JSON.stringify({
               type: 'frame',
               sessionId,
               frame: optimizedImage.toString('base64'),
               frameNumber: frameCount++,
-              timestamp: startTime
+              timestamp: startTime,
+              width: downscaleWidth,
+              height: downscaleHeight,
+              targetWidth: width,
+              targetHeight: height
             }));
             
             errorCount = 0;
@@ -208,7 +214,7 @@ export class StreamManager {
           }
 
           const processingTime = Date.now() - startTime;
-          const nextDelay = Math.max(1, frameInterval - processingTime);
+          const nextDelay = Math.max(0, frameInterval - processingTime);
 
           if (isStreaming) {
             setTimeout(streamLoop, nextDelay);
@@ -237,7 +243,7 @@ export class StreamManager {
           }
           
           if (isStreaming) {
-            setTimeout(streamLoop, frameInterval * 2);
+            setTimeout(streamLoop, frameInterval);
           }
         }
       };

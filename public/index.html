@@ -495,13 +495,16 @@
             height: auto;
             display: none;
             background: #ffffff;
-            /* GPU acceleration and optimization for smooth rendering */
+            /* Hardware-accelerated upscaling with crisp rendering */
             transform: translateZ(0);
-            will-change: contents;
+            will-change: transform;
+            image-rendering: auto;
             image-rendering: -webkit-optimize-contrast;
-            image-rendering: crisp-edges;
             backface-visibility: hidden;
             -webkit-backface-visibility: hidden;
+            /* Smooth sub-pixel rendering */
+            -webkit-font-smoothing: subpixel-antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
 
         #stream.active {

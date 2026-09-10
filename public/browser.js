@@ -11,10 +11,9 @@ class RemoteBrowserClient {
     this.reconnectDelay = 2000;
     this.connectionRetryTimeout = null;
     
-    this.frameQueue = [];
-    this.isProcessingFrame = false;
-    this.lastFrameTime = 0;
-    this.targetFrameTime = 1000 / 60;
+    // Hardware-accelerated upscaling canvas
+    this.upscaleCanvas = null;
+    this.upscaleContext = null;
     
     this.isMobile = this.detectMobile();
     
@@ -553,7 +552,7 @@ class RemoteBrowserClient {
         break;
 
       case 'frame':
-        this.queueFrame(data);
+        this.renderFrameInstant(data);
         break;
 
       case 'pageInfo':
@@ -579,100 +578,84 @@ class RemoteBrowserClient {
     }
   }
 
-  queueFrame(data) {
-    // Memory optimization: Keep queue small (max 2 frames)
-    if (this.frameQueue.length >= 2) {
-      // Drop oldest frame to prevent memory buildup
-      this.frameQueue.shift();
-    }
-    
-    // Add frame to queue
-    this.frameQueue.push(data);
-    
-    // Start processing if not already processing
-    if (!this.isProcessingFrame) {
-      this.processNextFrame();
-    }
-  }
-
-  processNextFrame() {
-    if (this.frameQueue.length === 0) {
-      this.isProcessingFrame = false;
-      return;
+  renderFrameInstant(data) {
+    // Initialize hardware-accelerated upscaling canvas once
+    if (!this.upscaleCanvas) {
+      this.upscaleCanvas = document.createElement('canvas');
+      this.upscaleCanvas.width = data.targetWidth || this.viewportWidth;
+      this.upscaleCanvas.height = data.targetHeight || this.viewportHeight;
+      this.upscaleContext = this.upscaleCanvas.getContext('2d', {
+        alpha: false,
+        desynchronized: true,
+        willReadFrequently: false
+      });
+      // Enable image smoothing for better upscaling
+      this.upscaleContext.imageSmoothingEnabled = true;
+      this.upscaleContext.imageSmoothingQuality = 'high';
     }
 
-    this.isProcessingFrame = true;
-    const data = this.frameQueue.shift();
+    // Decode base64 and create image instantly
+    const img = new Image();
     
-    // Render immediately for minimal latency
-    this.renderFrame(data);
-    
-    // Process next frame on next tick
-    requestAnimationFrame(() => this.processNextFrame());
-  }
-
-  renderFrame(data) {
-    // Ultra-fast base64 decode and blob creation
-    const byteCharacters = atob(data.frame);
-    const byteNumbers = new Uint8Array(byteCharacters.length);
-    
-    for (let i = 0; i < byteCharacters.length; i++) {
-      byteNumbers[i] = byteCharacters.charCodeAt(i);
-    }
-    
-    const blob = new Blob([byteNumbers], { type: 'image/webp' });
-    const url = URL.createObjectURL(blob);
-    
-    // Clean up old blob URL
-    const oldSrc = this.elements.stream.src;
-    if (oldSrc && oldSrc.startsWith('blob:')) {
-      URL.revokeObjectURL(oldSrc);
-    }
-    
-    this.elements.stream.src = url;
-    
-    // Update stats
-    this.frameCount++;
-    this.fpsCounter++;
-    this.elements.frameCountEl.textContent = this.frameCount;
-
-    const now = Date.now();
-    const elapsed = now - this.lastFpsUpdate;
-    if (elapsed >= 1000) {
-      const fps = Math.round((this.fpsCounter / elapsed) * 1000);
-      this.elements.fpsDisplay.textContent = `${fps} FPS`;
-      this.fpsCounter = 0;
-      this.lastFpsUpdate = now;
-    }
-
-    const latency = Date.now() - data.timestamp;
-    this.elements.latency.textContent = `${latency}ms`;
-
-    if (this.frameCount === 1) {
-      this.hideLoadingSpinner();
-      this.updateProgressBar(100);
+    img.onload = () => {
+      // Hardware-accelerated upscaling via canvas
+      this.upscaleContext.drawImage(
+        img, 
+        0, 0, data.width, data.height,                              // Source dimensions
+        0, 0, data.targetWidth || this.viewportWidth, 
+        data.targetHeight || this.viewportHeight                     // Target dimensions (upscaled)
+      );
       
-      setTimeout(() => {
-        this.elements.loadingBar.classList.remove('active');
-        this.elements.loadingBar.style.width = '0%';
-      }, 200);
-      
-      this.elements.stream.classList.add('active');
-    }
+      // Convert to blob and display
+      this.upscaleCanvas.toBlob((blob) => {
+        // Clean up old blob URL
+        const oldSrc = this.elements.stream.src;
+        if (oldSrc && oldSrc.startsWith('blob:')) {
+          URL.revokeObjectURL(oldSrc);
+        }
+        
+        const url = URL.createObjectURL(blob);
+        this.elements.stream.src = url;
+        
+        // Update stats
+        this.frameCount++;
+        this.fpsCounter++;
+        this.elements.frameCountEl.textContent = this.frameCount;
+
+        const now = Date.now();
+        const elapsed = now - this.lastFpsUpdate;
+        if (elapsed >= 1000) {
+          const fps = Math.round((this.fpsCounter / elapsed) * 1000);
+          this.elements.fpsDisplay.textContent = `${fps} FPS`;
+          this.fpsCounter = 0;
+          this.lastFpsUpdate = now;
+        }
+
+        const latency = Date.now() - data.timestamp;
+        this.elements.latency.textContent = `${latency}ms`;
+
+        if (this.frameCount === 1) {
+          this.hideLoadingSpinner();
+          this.updateProgressBar(100);
+          
+          setTimeout(() => {
+            this.elements.loadingBar.classList.remove('active');
+            this.elements.loadingBar.style.width = '0%';
+          }, 200);
+          
+          this.elements.stream.classList.add('active');
+        }
+      }, 'image/webp', 0.92);
+    };
     
-    // Auto cleanup every 50 frames
-    if (this.frameCount % 50 === 0) {
-      this.cleanupMemory();
-    }
+    img.onerror = () => {
+      console.error('Failed to decode frame');
+    };
+    
+    img.src = `data:image/webp;base64,${data.frame}`;
   }
 
   cleanupMemory() {
-    // Clear frame queue if it's getting large
-    if (this.frameQueue.length > 5) {
-      console.log('🧹 Clearing frame queue to save memory');
-      this.frameQueue = this.frameQueue.slice(-2); // Keep only last 2
-    }
-    
     // Suggest garbage collection (browser decides)
     if (window.gc && typeof window.gc === 'function') {
       window.gc();
@@ -748,7 +731,11 @@ class RemoteBrowserClient {
     this.sessionId = null;
     this.isStreaming = false;
     
-    this.frameQueue = [];
+    // Clean up upscale canvas
+    if (this.upscaleCanvas) {
+      this.upscaleContext = null;
+      this.upscaleCanvas = null;
+    }
     
     this.enableNavigation(false);
     this.elements.stream.classList.remove('active');
