@@ -48,6 +48,40 @@ export class StreamManager {
     if (session.ws.readyState === session.ws.OPEN) session.ws.send(JSON.stringify({ type: 'pageInfo', sessionId: session.id, tabId: tab.id, url: tab.url, title: tab.title }));
   }
 
+  async startScreencast(session, tab) {
+    await session.stopScreencast?.();
+    let lastSentAt = 0;
+    const onFrame = ({ data, metadata, sessionId: frameId }) => {
+      // Acknowledge immediately; Chrome otherwise retains screencast buffers.
+      tab.cdp.send('Page.screencastFrameAck', { sessionId: frameId }).catch(() => {});
+      if (session.activeTabId !== tab.id || session.ws.readyState !== session.ws.OPEN || session.ws.bufferedAmount >= MAX_BUFFERED_BYTES) return;
+      const now = Date.now();
+      if (now - lastSentAt < (1000 / STREAM_FPS)) return;
+      const image = Buffer.from(data, 'base64');
+      if (!image.length) return;
+      const width = Math.min(0xffff, Math.round((metadata.deviceWidth || session.settings.width) * session.settings.renderScale));
+      const height = Math.min(0xffff, Math.round((metadata.deviceHeight || session.settings.height) * session.settings.renderScale));
+      const header = Buffer.allocUnsafe(17);
+      header.writeUInt8(2, 0); header.writeUInt32BE(session.frameNumber++, 1); header.writeDoubleBE(now, 5);
+      header.writeUInt16BE(width, 13); header.writeUInt16BE(height, 15);
+      session.ws.send(Buffer.concat([header, image]), { binary: true, compress: false });
+      lastSentAt = now;
+      if (DEBUG && session.frameNumber % STREAM_FPS === 0) log('screencast stats', `session=${session.id.slice(0, 8)} frames=${session.frameNumber} size=${Math.round(image.length / 1024)}KB`);
+    };
+    tab.cdp.on('Page.screencastFrame', onFrame);
+    await tab.cdp.send('Page.startScreencast', {
+      format: 'jpeg', quality: session.settings.quality,
+      maxWidth: Math.round(session.settings.width * session.settings.renderScale),
+      maxHeight: Math.round(session.settings.height * session.settings.renderScale),
+      everyNthFrame: 1
+    });
+    session.stopScreencast = async () => {
+      tab.cdp.off('Page.screencastFrame', onFrame);
+      await tab.cdp.send('Page.stopScreencast').catch(() => {});
+    };
+    log('screencast active', `session=${session.id.slice(0, 8)} tab=${tab.id.slice(0, 8)}`);
+  }
+
   async startStream(rawUrl, ws, options = {}) {
     const url = normalizeRemoteUrl(rawUrl), sessionId = randomUUID();
     log('starting stream', `session=${sessionId.slice(0, 8)} url=${url}`);
@@ -72,66 +106,16 @@ export class StreamManager {
       ]).catch((error) => { if (page.url() === 'about:blank') throw error; });
       const firstTab = { id: randomUUID(), page, cdp, url: page.url(), title: await page.title().catch(() => '') };
       send({ type: 'progress', progress: 95, message: 'Streaming started', subtext: 'Ready' });
-      let active = true, frameNumber = 0, consecutiveErrors = 0;
-      const streamLoop = async () => {
-        const session = this.sessions.get(sessionId), activeTab = session?.tabs.get(session.activeTabId);
-        if (!active || !activeTab || activeTab.page.isClosed()) return;
-        const startedAt = Date.now();
-        try {
-          // Keep latency bounded: discard frames while the network is behind.
-          if (ws.readyState === ws.OPEN && ws.bufferedAmount < MAX_BUFFERED_BYTES) {
-            // Chrome captures directly at the smaller scale. This avoids a
-            // full-size image buffer and expensive server-side resizing.
-            let image, sourceWidth, sourceHeight;
-            try {
-              const captureOptions = {
-                // JPEG is materially faster to encode than WebP on small shared
-                // CPUs. At this scale/quality it remains compact and decodes in
-                // every browser without a compatibility fallback.
-                format: 'jpeg', quality: settings.quality,
-                clip: { x: 0, y: 0, width: settings.width, height: settings.height, scale: settings.renderScale },
-                captureBeyondViewport: false
-              };
-              // `optimizeForSpeed` is unavailable on older Chromium versions.
-              // Capture once without it before ever falling back to full size.
-              let capture;
-              try { capture = await activeTab.cdp.send('Page.captureScreenshot', { ...captureOptions, optimizeForSpeed: true }); }
-              catch (unsupportedOption) { capture = await activeTab.cdp.send('Page.captureScreenshot', captureOptions); }
-              image = Buffer.from(capture.data, 'base64');
-              sourceWidth = Math.round(settings.width * settings.renderScale);
-              sourceHeight = Math.round(settings.height * settings.renderScale);
-              if (image.length === 0) throw new Error('Empty CDP screenshot');
-            } catch (captureError) {
-              // Some managed Chromium builds reject scaled CDP captures. The
-              // normal Puppeteer path is slower, but it keeps the stream alive.
-              log('scaled capture fallback', `session=${sessionId.slice(0, 8)} reason=${captureError.message}`);
-              image = await activeTab.page.screenshot({ type: 'jpeg', quality: settings.quality, optimizeForSpeed: true });
-              sourceWidth = settings.width;
-              sourceHeight = settings.height;
-            }
-            const header = Buffer.allocUnsafe(17);
-            header.writeUInt8(2, 0); header.writeUInt32BE(frameNumber++, 1); header.writeDoubleBE(startedAt, 5);
-            header.writeUInt16BE(sourceWidth, 13); header.writeUInt16BE(sourceHeight, 15);
-            ws.send(Buffer.concat([header, image]), { binary: true, compress: false });
-            if (DEBUG && frameNumber % STREAM_FPS === 0) log('frame stats', `session=${sessionId.slice(0, 8)} frames=${frameNumber} size=${Math.round(image.length / 1024)}KB capture=${Date.now() - startedAt}ms`);
-          }
-          consecutiveErrors = 0;
-        } catch (error) {
-          if (/closed|Target closed/i.test(error.message)) return;
-          if (consecutiveErrors === 1 || consecutiveErrors >= 8) log('capture error', `session=${sessionId.slice(0, 8)} count=${consecutiveErrors} ${error.message}`);
-          if (consecutiveErrors >= 8) { active = false; send({ type: 'error', message: 'Stream stopped after repeated capture failures.' }); return; }
-        }
-        setTimeout(streamLoop, Math.max(0, (1000 / STREAM_FPS) - (Date.now() - startedAt)));
-      };
-      const session = { id: sessionId, browser, ws, settings, tabs: new Map([[firstTab.id, firstTab]]), activeTabId: firstTab.id, pendingScroll: 0, scrollScheduled: false, stop: () => { active = false; } };
+      const session = { id: sessionId, browser, ws, settings, tabs: new Map([[firstTab.id, firstTab]]), activeTabId: firstTab.id, frameNumber: 0, pendingScroll: 0, scrollScheduled: false, stop: async () => { await session.stopScreencast?.(); } };
       this.sessions.set(sessionId, session);
       await this.sendPageInfo(session, firstTab);
       this.sendTabState(session);
       send({ type: 'progress', progress: 100, message: 'Stream ready', subtext: 'Connected' });
       log('stream ready', `session=${sessionId.slice(0, 8)} ${settings.width}x${settings.height} ${STREAM_FPS}fps`);
-      streamLoop();
+      await this.startScreencast(session, firstTab);
       return sessionId;
     } catch (error) {
+      this.sessions.delete(sessionId);
       if (page) await page.close().catch(() => {});
       if (browser) this.browserPool.release(browser);
       throw error;
@@ -146,7 +130,7 @@ export class StreamManager {
   }
   async stopStream(sessionId) {
     const session = this.sessions.get(sessionId); if (!session) return;
-    session.stop(); this.sessions.delete(sessionId); log('stream stopped', `session=${sessionId.slice(0, 8)}`);
+    await session.stop(); this.sessions.delete(sessionId); log('stream stopped', `session=${sessionId.slice(0, 8)}`);
     await Promise.all([...session.tabs.values()].map((tab) => tab.page.close().catch(() => {})));
     this.browserPool.release(session.browser);
   }
@@ -158,12 +142,12 @@ export class StreamManager {
     const tab = { id: randomUUID(), page, cdp, url: 'about:blank', title: 'New Tab' };
     session.tabs.set(tab.id, tab); session.activeTabId = tab.id;
     await page.goto(normalizeRemoteUrl(rawUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
-    await this.sendPageInfo(session, tab); this.sendTabState(session);
+    await this.sendPageInfo(session, tab); this.sendTabState(session); await this.startScreencast(session, tab);
   }
   async switchTab(sessionId, tabId) {
     const session = this.sessions.get(sessionId), tab = session?.tabs.get(tabId);
     if (!tab) throw new Error('Unknown tab.');
-    session.activeTabId = tabId; log('switched tab', `session=${sessionId.slice(0, 8)} tab=${tabId.slice(0, 8)}`); await this.sendPageInfo(session, tab); this.sendTabState(session);
+    session.activeTabId = tabId; log('switched tab', `session=${sessionId.slice(0, 8)} tab=${tabId.slice(0, 8)}`); await this.sendPageInfo(session, tab); this.sendTabState(session); await this.startScreencast(session, tab);
   }
   async closeTab(sessionId, tabId) {
     const session = this.sessions.get(sessionId), tab = session?.tabs.get(tabId);
@@ -173,9 +157,12 @@ export class StreamManager {
       await this.sendPageInfo(session, tab); return;
     }
     const tabIds = [...session.tabs.keys()], closingIndex = tabIds.indexOf(tabId);
+    const wasActive = session.activeTabId === tabId;
     session.tabs.delete(tabId); await tab.page.close().catch(() => {});
-    if (session.activeTabId === tabId) session.activeTabId = tabIds[Math.max(0, closingIndex - 1)];
-    await this.sendPageInfo(session, session.tabs.get(session.activeTabId)); this.sendTabState(session);
+    if (wasActive) session.activeTabId = tabIds[Math.max(0, closingIndex - 1)];
+    const activeTab = session.tabs.get(session.activeTabId);
+    await this.sendPageInfo(session, activeTab); this.sendTabState(session);
+    if (wasActive) await this.startScreencast(session, activeTab);
   }
   async handleInteraction(sessionId, action) {
     const session = this.sessions.get(sessionId); if (!session) throw new Error('Unknown stream session.');

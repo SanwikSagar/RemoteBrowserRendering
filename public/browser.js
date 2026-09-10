@@ -4,7 +4,7 @@ class RemoteBrowserClient {
     this.ws = null; this.sessionId = null; this.isStreaming = false;
     this.frameCount = 0; this.fpsCounter = 0; this.lastFpsUpdate = performance.now();
     this.reconnectAttempts = 0; this.maxReconnectAttempts = Infinity; this.connectionRetryTimeout = null;
-    this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.currentObjectUrl = null; this.startTimeout = null; this.firstFrameTimeout = null;
+    this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.streamContext = null; this.webCodecsAvailable = typeof ImageDecoder === 'function'; this.startTimeout = null; this.firstFrameTimeout = null;
     this.pendingScroll = 0; this.scrollScheduled = false; this.touchState = null; this.suppressClickUntil = 0;
     this.streamVersion = 0;
     this.tabs = []; this.activeTabId = null;
@@ -96,7 +96,10 @@ class RemoteBrowserClient {
     e.stream.addEventListener('pointercancel', () => { this.touchState = null; });
     e.stream.addEventListener('contextmenu', (event) => event.preventDefault());
     document.addEventListener('keydown', (event) => this.handleKeyboard(event));
-    document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) this.elements.browserWindow.classList.remove('focus-mode'); });
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement) this.elements.browserWindow.classList.remove('focus-mode');
+      requestAnimationFrame(() => this.resizeRenderer());
+    });
   }
   toggleSettings() {
     if (this.elements.settingsMenu.classList.contains('active')) return this.hideSettings();
@@ -114,7 +117,7 @@ class RemoteBrowserClient {
       else if (root.classList.contains('focus-mode')) root.classList.remove('focus-mode');
       else { root.classList.add('focus-mode'); await root.requestFullscreen?.(); }
     } catch { /* Focus mode still gives the user the full content area. */ }
-    setTimeout(() => { this.updateViewportSize(); }, 0);
+    setTimeout(() => { this.updateViewportSize(); this.resizeRenderer(); }, 0);
   }
   createTab() {
     if (!this.isStreaming) return this.startStream();
@@ -238,7 +241,7 @@ class RemoteBrowserClient {
   startStream() {
     if (this.ws?.readyState !== WebSocket.OPEN) return this.showConnectionOverlay('Connecting...', 'The server connection is being restored');
     let url; try { url = this.normalizeUrl(this.elements.urlInput.value || 'https://www.google.com'); } catch (error) { return this.showNotification(error.message, 'error'); }
-    this.streamVersion++; this.latestFrame = null; this.decodeInFlight = false;
+    this.streamVersion++; this.latestFrame = null;
     this.elements.urlInput.value = url; this.savePreferences(); this.frameCount = this.fpsCounter = 0; this.showLoadingSpinner('Starting browser...', 'Loading page');
     this.log('starting stream', `${url} ${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`);
     this.ws.send(JSON.stringify({ type: 'start', url, fps: this.fps(), quality: this.quality(), width: this.viewportWidth, height: this.viewportHeight, isMobile: this.isMobile }));
@@ -264,22 +267,79 @@ class RemoteBrowserClient {
     const view = new DataView(buffer), format = view.getUint8(0);
     if (format !== 1 && format !== 2) return;
     const mimeType = format === 2 ? 'image/jpeg' : 'image/webp';
-    this.latestFrame = { timestamp: view.getFloat64(5), image: new Blob([buffer.slice(17)], { type: mimeType }) };
+    // Keep the WebSocket payload as bytes. The fast path decodes that buffer
+    // directly, avoiding Blob URLs and the corresponding DevTools image rows.
+    this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer, 17) };
     if (!this.decodeInFlight && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
   }
-  renderLatestFrame() {
+  resizeRenderer() {
+    const canvas = this.elements.stream;
+    // A modest backing-store cap keeps canvas upscaling responsive on phones,
+    // while retaining enough density for text.  CSS continues to fill all of
+    // the available viewport without a layout change for each incoming frame.
+    const scale = Math.min(window.devicePixelRatio || 1, 1.5);
+    const width = Math.max(1, Math.round(canvas.clientWidth * scale));
+    const height = Math.max(1, Math.round(canvas.clientHeight * scale));
+    if (canvas.width === width && canvas.height === height && this.streamContext) return true;
+    canvas.width = width; canvas.height = height;
+    this.streamContext = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    if (this.streamContext) {
+      this.streamContext.imageSmoothingEnabled = true;
+      this.streamContext.imageSmoothingQuality = 'high';
+    }
+    return Boolean(this.streamContext);
+  }
+  async decodeFrame(frame) {
+    // Chrome's WebCodecs decoder accepts the received JPEG bytes directly. It
+    // avoids both an Image element and a Blob URL, keeping the Network panel
+    // quiet and the compositor free of per-frame resource bookkeeping.
+    if (this.webCodecsAvailable) {
+      let decoder;
+      try {
+        decoder = new ImageDecoder({ type: frame.mimeType, data: frame.bytes, preferAnimation: false });
+        const result = await decoder.decode({ frameIndex: 0 });
+        decoder.close();
+        return { source: result.image, dispose: () => result.image.close() };
+      } catch (error) {
+        decoder?.close();
+        this.webCodecsAvailable = false;
+        this.log('WebCodecs decode unavailable; using ImageBitmap fallback', error.message || error);
+      }
+    }
+    const blob = new Blob([frame.bytes], { type: frame.mimeType });
+    if (typeof createImageBitmap === 'function') {
+      const bitmap = await createImageBitmap(blob);
+      return { source: bitmap, dispose: () => bitmap.close() };
+    }
+    // Older browsers keep the same canvas pipeline. This fallback never swaps
+    // the visible element or forces a relayout for each streamed frame.
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob), image = new Image();
+      image.onload = () => resolve({ source: image, dispose: () => URL.revokeObjectURL(url) });
+      image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image decode failed')); };
+      image.src = url;
+    });
+  }
+  async renderLatestFrame() {
     this.renderScheduled = false; if (this.decodeInFlight) return;
     const frame = this.latestFrame; this.latestFrame = null; if (!frame) return;
     const version = this.streamVersion;
     this.decodeInFlight = true;
-    const url = URL.createObjectURL(frame.image), image = this.elements.stream;
-    image.onload = () => {
-      if (version !== this.streamVersion) { URL.revokeObjectURL(url); return; }
-      const previous = this.currentObjectUrl; this.currentObjectUrl = url; if (previous) URL.revokeObjectURL(previous);
-      this.decodeInFlight = false; this.recordFrame(frame.timestamp); this.scheduleLatestFrame();
-    };
-    image.onerror = () => { URL.revokeObjectURL(url); if (version === this.streamVersion) { this.decodeInFlight = false; this.scheduleLatestFrame(); } };
-    image.src = url;
+    try {
+      const decoded = await this.decodeFrame(frame);
+      if (version === this.streamVersion) this.elements.stream.classList.add('active');
+      if (version === this.streamVersion && this.resizeRenderer()) {
+        const canvas = this.elements.stream;
+        this.streamContext.drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
+        this.recordFrame(frame.timestamp);
+      }
+      decoded.dispose();
+    } catch (error) {
+      this.log('frame decode failed', error);
+    } finally {
+      this.decodeInFlight = false;
+      this.scheduleLatestFrame();
+    }
   }
   scheduleLatestFrame() { if (this.latestFrame && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); } }
   recordFrame(timestamp) {
@@ -290,7 +350,8 @@ class RemoteBrowserClient {
   }
   resetStream() {
     clearTimeout(this.startTimeout); clearTimeout(this.firstFrameTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.tabs = []; this.activeTabId = null; this.renderTabs(); this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
-    if (this.currentObjectUrl) URL.revokeObjectURL(this.currentObjectUrl); this.currentObjectUrl = null; this.elements.stream.removeAttribute('src'); this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
+    if (this.streamContext) this.streamContext.clearRect(0, 0, this.elements.stream.width, this.elements.stream.height);
+    this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
     this.elements.startStreamOption.style.display = 'flex'; this.elements.stopStreamOption.style.display = 'none'; this.updateStatus('connected', 'Connected');
   }
   enableNavigation(enabled) { ['backBtn','forwardBtn','refreshBtn','homeBtn'].forEach((key) => { this.elements[key].disabled = !enabled; }); }

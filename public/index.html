@@ -521,7 +521,6 @@
             height: 100%;
             /* The remote viewport is sized to this area, so filling it avoids
                letterboxing and makes touch/click coordinates exact. */
-            object-fit: fill;
             touch-action: none;
             display: none;
             background: #ffffff;
@@ -956,7 +955,7 @@
             <div class="loading-bar" id="loadingBar"></div>
             
             <div class="viewport" id="viewport">
-                <img id="stream" alt="Browser Stream">
+                <canvas id="stream" aria-label="Browser Stream"></canvas>
                 
                 <!-- Placeholder -->
                 <div class="placeholder" id="placeholder">
@@ -1008,6 +1007,6 @@
         </div>
     </div>
 
-    <script src="browser.js?v=20260910.2"></script>
+    <script src="browser.js?v=20260910.3"></script>
 </body>
 </html>
