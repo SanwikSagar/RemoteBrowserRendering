@@ -1,0 +1,13 @@
+services:
+  remote-browser:
+    build: .
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      MAX_BROWSERS: 1
+      NODE_OPTIONS: --max-old-space-size=768

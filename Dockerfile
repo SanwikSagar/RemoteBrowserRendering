@@ -23,6 +23,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Use the ARM64 Chromium package installed above. This prevents npm/Puppeteer
+# from downloading a second (and often incompatible) browser binary.
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
 # Copy package files
 COPY package*.json ./
 
@@ -31,9 +36,6 @@ RUN npm install --omit=dev
 
 # Copy application files
 COPY . .
-
-# Set Puppeteer to use installed Chromium
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Expose port
 EXPOSE 3000
