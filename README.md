@@ -4,8 +4,7 @@ High-performance remote browser rendering system streaming web pages as WebP ima
 
 ## Features
 
-- **Tile-Based Diffing** - Automatically sends only changed regions (70-90% bandwidth savings)
-- **WebP Streaming** - 30-40% smaller than JPEG with better quality
+- **Binary WebP Streaming** - avoids Base64 and WebSocket compression overhead
 - **Mobile-Responsive** - Automatically detects and renders mobile/desktop sites correctly
 - **High Performance** - Up to 60 FPS with sub-10ms encoding
 - **Memory Optimized** - Automatic garbage collection and efficient resource management
@@ -74,8 +73,8 @@ NODE_OPTIONS="--expose-gc"         # Enable garbage collection
 - Hardware-accelerated rendering
 - Aggressive resource blocking (ads, analytics, trackers)
 - Memory cleanup every 50 frames
-- Frame queue limited to 3 for memory efficiency
-- 64×64 tile grid for optimal change detection
+- Backpressure-aware frame skipping so slow links do not accumulate latency
+- Browser-native image decoding with a single live Blob URL
 
 ## API
 

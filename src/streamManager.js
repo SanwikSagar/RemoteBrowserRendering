@@ -1,377 +1,124 @@
 import { randomUUID } from 'crypto';
-import sharp from 'sharp';
+
+const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 512 * 1024, START_TIMEOUT_MS = 45_000;
+const clamp = (value, min, max, fallback) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback;
+};
+
+export function normalizeRemoteUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > 2_048) throw new Error('Enter a valid URL.');
+  let url;
+  try { url = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`); }
+  catch { throw new Error('Enter a valid HTTP or HTTPS URL.'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Only credential-free HTTP and HTTPS URLs are allowed.');
+  }
+  return url.toString();
+}
 
 export class StreamManager {
-  constructor(browserPool) {
-    this.browserPool = browserPool;
-    this.sessions = new Map();
-  }
+  constructor(browserPool) { this.browserPool = browserPool; this.sessions = new Map(); }
 
-  async startStream(url, ws, options = {}) {
-    const sessionId = randomUUID();
-    const fps = Math.min(options.fps || 30, 60);
-    const frameInterval = 1000 / fps;
-    const quality = Math.min(Math.max(options.quality || 45, 30), 70);
-    const width = options.width || 1280;
-    const height = options.height || 720;
-    const isMobile = options.isMobile || false;
-
-    console.log(`Starting stream session ${sessionId} for ${url}`);
-    console.log(`Settings: ${fps} FPS, ${quality}% quality, ${width}x${height}, Mobile: ${isMobile}`);
-
-    const sendProgress = (progress, message, subtext) => {
-      if (ws.readyState === 1) {
-        ws.send(JSON.stringify({
-          type: 'progress',
-          progress,
-          message,
-          subtext
-        }));
-      }
+  async startStream(rawUrl, ws, options = {}) {
+    const url = normalizeRemoteUrl(rawUrl), sessionId = randomUUID();
+    const settings = {
+      fps: clamp(options.fps, 10, 60, 30), quality: clamp(options.quality, 30, 80, 50),
+      width: clamp(options.width, 320, MAX_WIDTH, 1280), height: clamp(options.height, 240, MAX_HEIGHT, 720),
+      isMobile: Boolean(options.isMobile)
     };
-
-    let browser = null;
-    let page = null;
-
+    const send = (message) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(message));
+    let browser, page;
     try {
-      sendProgress(5, 'Acquiring browser...', 'Initializing');
+      send({ type: 'progress', progress: 5, message: 'Acquiring browser...', subtext: 'Initializing' });
       browser = await this.browserPool.acquire();
-      
-      sendProgress(10, 'Creating page...', 'Setting up viewport');
       page = await browser.newPage();
-
-      // Set user agent BEFORE viewport for proper mobile detection
-      const userAgent = isMobile 
-        ? 'Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'
-        : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-      
-      await page.setUserAgent(userAgent);
-
-      // Set viewport with proper mobile configuration
-      await page.setViewport({
-        width,
-        height,
-        deviceScaleFactor: isMobile ? 3 : 1,
-        isMobile: isMobile,
-        hasTouch: isMobile,
-        isLandscape: false
-      });
-
-      // Set extra mobile-specific headers
-      if (isMobile) {
+      await page.setUserAgent(settings.isMobile
+        ? 'Mozilla/5.0 (Linux; Android 13; SM-G950F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+        : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36');
+      await page.setViewport({ width: settings.width, height: settings.height, deviceScaleFactor: 1, isMobile: settings.isMobile, hasTouch: settings.isMobile });
+      if (settings.isMobile) {
         await page.setExtraHTTPHeaders({
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Sec-Ch-Ua-Mobile': '?1',
-          'Sec-Ch-Ua-Platform': '"Android"'
+          'Sec-CH-UA-Mobile': '?1',
+          'Sec-CH-UA-Platform': '"Android"',
+          'Accept-Language': 'en-US,en;q=0.9'
         });
       }
-
-      sendProgress(15, 'Configuring resources...', 'Optimizing performance');
       await page.setRequestInterception(true);
-      
       page.on('request', (request) => {
-        const resourceType = request.resourceType();
-        const requestUrl = request.url();
-        
-        if (resourceType === 'media' || 
-            resourceType === 'font' || 
-            resourceType === 'websocket' ||
-            requestUrl.includes('doubleclick') || 
-            requestUrl.includes('analytics') || 
-            requestUrl.includes('ads') ||
-            requestUrl.includes('tracking') ||
-            requestUrl.includes('facebook.com/tr') ||
-            requestUrl.includes('google-analytics')) {
-          request.abort().catch(() => {});
-        } else {
-          request.continue().catch(() => {});
-        }
+        const type = request.resourceType(), requestUrl = request.url().toLowerCase();
+        const blocked = type === 'media' || type === 'font' || /(?:doubleclick|google-analytics|\/analytics|\/tracking|facebook\.com\/tr|adsystem)/.test(requestUrl);
+        (blocked ? request.abort() : request.continue()).catch(() => {});
       });
-
-      await page.evaluateOnNewDocument(() => {
-        delete window.navigator.serviceWorker;
-        window.Notification = undefined;
-        window.Worker = undefined;
-        window.SharedWorker = undefined;
-        window.RTCPeerConnection = undefined;
-        if ('webkitRTCPeerConnection' in window) {
-          window.webkitRTCPeerConnection = undefined;
-        }
-        window.indexedDB = undefined;
-      });
-
-      sendProgress(20, 'Setting user agent...', 'Preparing browser');
-      sendProgress(30, 'Navigating to page...', `Loading ${url}`);
-      
-      try {
-        await page.goto(url, { 
-          waitUntil: 'domcontentloaded',
-          timeout: 30000
-        });
-        sendProgress(70, 'Page loaded', 'Processing content');
-      } catch (navError) {
-        sendProgress(70, 'Page partially loaded', 'Continuing...');
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 500));
-      sendProgress(80, 'Stabilizing page...', 'Nearly ready');
-
-      sendProgress(85, 'Sending page info...', 'Almost ready');
-      try {
-        const currentUrl = page.url();
-        const title = await page.title();
-        if (ws.readyState === 1) {
-          ws.send(JSON.stringify({
-            type: 'pageInfo',
-            sessionId,
-            url: currentUrl,
-            title: title
-          }));
-        }
-      } catch (error) {
-        console.warn('Failed to get page info:', error.message);
-      }
-
-      sendProgress(90, 'Starting stream...', 'Capturing frames');
-
-      let isStreaming = true;
-      let frameCount = 0;
-      let errorCount = 0;
-      const maxErrors = 5;
-
-      // Calculate downscaled dimensions for server processing
-      const downscaleWidth = Math.round(width * 0.6);   // 60% size for extreme compression
-      const downscaleHeight = Math.round(height * 0.6);
-
+      await page.evaluateOnNewDocument(() => { window.Notification = undefined; window.RTCPeerConnection = undefined; window.indexedDB = undefined; });
+      send({ type: 'progress', progress: 30, message: 'Navigating to page...', subtext: 'Loading content' });
+      await Promise.race([
+        page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('The browser took too long to start.')), START_TIMEOUT_MS))
+      ]).catch((error) => { if (page.url() === 'about:blank') throw error; });
+      send({ type: 'pageInfo', sessionId, url: page.url(), title: await page.title().catch(() => '') });
+      send({ type: 'progress', progress: 95, message: 'Streaming started', subtext: 'Ready' });
+      let active = true, frameNumber = 0, consecutiveErrors = 0;
       const streamLoop = async () => {
-        if (!isStreaming) {
-          return;
-        }
-
-        const startTime = Date.now();
-
+        if (!active || page.isClosed()) return;
+        const startedAt = Date.now();
         try {
-          if (page.isClosed()) {
-            isStreaming = false;
-            return;
+          // Keep latency bounded: discard frames while the network is behind.
+          if (ws.readyState === ws.OPEN && ws.bufferedAmount < MAX_BUFFERED_BYTES) {
+            const image = await page.screenshot({ type: 'webp', quality: settings.quality, optimizeForSpeed: true });
+            const header = Buffer.allocUnsafe(17);
+            header.writeUInt8(1, 0); header.writeUInt32BE(frameNumber++, 1); header.writeDoubleBE(startedAt, 5);
+            header.writeUInt16BE(settings.width, 13); header.writeUInt16BE(settings.height, 15);
+            ws.send(Buffer.concat([header, image]), { binary: true, compress: false });
           }
-
-          // Ultra-fast screenshot at reduced resolution
-          const screenshot = await page.screenshot({
-            type: 'jpeg',
-            quality: 60,                    // Reasonable JPEG quality
-            encoding: 'binary',
-            optimizeForSpeed: true,
-            clip: {
-              x: 0,
-              y: 0,
-              width: width,
-              height: height
-            }
-          });
-
-          // Minimal server-side processing - just downscale and compress
-          const optimizedImage = await sharp(screenshot)
-            .resize(downscaleWidth, downscaleHeight, {
-              kernel: 'cubic',              // Better quality for upscaling
-              fastShrinkOnLoad: true
-            })
-            .webp({
-              quality: 50,                  // Balanced quality
-              effort: 0,                    // Fastest encoding
-              smartSubsample: true,
-              preset: 'picture'
-            })
-            .toBuffer();
-
-          if (ws.readyState === 1) {
-            const frameSize = Math.round(optimizedImage.length / 1024);
-            
-            // Log frame size every 30 frames for monitoring
-            if (frameCount % 30 === 0) {
-              console.log(`Frame ${frameCount}: ${frameSize} KB | ${downscaleWidth}×${downscaleHeight} → ${width}×${height}`);
-            }
-            
-            // Send with dimensions for client-side upscaling
-            ws.send(JSON.stringify({
-              type: 'frame',
-              sessionId,
-              frame: optimizedImage.toString('base64'),
-              frameNumber: frameCount++,
-              timestamp: startTime,
-              width: downscaleWidth,
-              height: downscaleHeight,
-              targetWidth: width,
-              targetHeight: height
-            }));
-            
-            errorCount = 0;
-          }
-
-          if (frameCount % 50 === 0 && global.gc) {
-            global.gc();
-          }
-
-          const processingTime = Date.now() - startTime;
-          const nextDelay = Math.max(0, frameInterval - processingTime);
-
-          if (isStreaming) {
-            setTimeout(streamLoop, nextDelay);
-          }
+          consecutiveErrors = 0;
         } catch (error) {
-          errorCount++;
-          
-          if (error.message.includes('closed') || error.message.includes('Target closed')) {
-            console.log('Page closed, stopping stream');
-            isStreaming = false;
-            return;
-          }
-          
-          console.error(`Streaming error (${errorCount}/${maxErrors}):`, error.message);
-          
-          if (errorCount >= maxErrors) {
-            console.error(`Too many errors, stopping stream ${sessionId}`);
-            isStreaming = false;
-            if (ws.readyState === 1) {
-              ws.send(JSON.stringify({
-                type: 'error',
-                message: `Stream error: ${error.message}`
-              }));
-            }
-            return;
-          }
-          
-          if (isStreaming) {
-            setTimeout(streamLoop, frameInterval);
-          }
+          if (/closed|Target closed/i.test(error.message)) return;
+          if (++consecutiveErrors >= 8) { active = false; send({ type: 'error', message: 'Stream stopped after repeated capture failures.' }); return; }
         }
+        setTimeout(streamLoop, Math.max(0, (1000 / settings.fps) - (Date.now() - startedAt)));
       };
-
-      sendProgress(95, 'Streaming started', 'Ready');
-      sendProgress(100, 'Stream ready', 'Connected');
-      
+      this.sessions.set(sessionId, { browser, page, ws, settings, stop: () => { active = false; } });
+      send({ type: 'progress', progress: 100, message: 'Stream ready', subtext: 'Connected' });
       streamLoop();
-
-      this.sessions.set(sessionId, {
-        browser,
-        page,
-        ws,
-        stop: () => { isStreaming = false; }
-      });
-
       return sessionId;
-
     } catch (error) {
-      console.error(`Failed to start stream: ${error.message}`);
-      
-      sendProgress(0, 'Stream failed', error.message);
-      
-      if (page) {
-        try {
-          await page.close();
-        } catch (e) {
-          console.error('Error closing page:', e.message);
-        }
-      }
-      if (browser) {
-        this.browserPool.release(browser);
-      }
-      
+      if (page) await page.close().catch(() => {});
+      if (browser) this.browserPool.release(browser);
       throw error;
     }
   }
 
+  updateStream(sessionId, changes = {}) {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error('Unknown stream session.');
+    session.settings.fps = clamp(changes.fps, 10, 60, session.settings.fps);
+    session.settings.quality = clamp(changes.quality, 30, 80, session.settings.quality);
+  }
   async stopStream(sessionId) {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
-      return;
-    }
-
-    session.stop();
-    
-    try {
-      await session.page.close();
-    } catch (error) {
-      console.error('Error closing page:', error.message);
-    }
-
-    this.browserPool.release(session.browser);
-    this.sessions.delete(sessionId);
+    const session = this.sessions.get(sessionId); if (!session) return;
+    session.stop(); this.sessions.delete(sessionId); await session.page.close().catch(() => {}); this.browserPool.release(session.browser);
   }
-
   async handleInteraction(sessionId, action) {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
-      return;
-    }
-
-    const { page, ws } = session;
-
-    try {
-      switch (action.type) {
-        case 'click':
-          await page.mouse.click(action.x, action.y, {
-            button: action.button === 'right' ? 'right' : 'left'
-          });
-          break;
-
-        case 'scroll':
-          await page.evaluate((deltaY) => {
-            window.scrollBy(0, deltaY);
-          }, action.deltaY);
-          break;
-
-        case 'type':
-          await page.keyboard.type(action.text);
-          break;
-
-        case 'key':
-          await page.keyboard.press(action.key);
-          break;
-
-        case 'navigate':
-          if (action.action === 'back') {
-            await page.goBack({ waitUntil: 'domcontentloaded', timeout: 20000 });
-          } else if (action.action === 'forward') {
-            await page.goForward({ waitUntil: 'domcontentloaded', timeout: 20000 });
-          } else if (action.action === 'reload') {
-            await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
-          } else if (action.action === 'goto' && action.url) {
-            await page.goto(action.url, { 
-              waitUntil: 'domcontentloaded', 
-              timeout: 30000 
-            });
-            await new Promise(resolve => setTimeout(resolve, 500));
-          }
-          
-          try {
-            const currentUrl = page.url();
-            const title = await page.title();
-            if (ws.readyState === 1) {
-              ws.send(JSON.stringify({
-                type: 'pageInfo',
-                sessionId,
-                url: currentUrl,
-                title: title
-              }));
-            }
-          } catch (error) {
-            console.warn('Failed to get page info after navigation:', error.message);
-          }
-          break;
-
-        default:
-          console.warn(`Unknown interaction type: ${action.type}`);
-      }
-    } catch (error) {
-      console.error('Interaction error:', error.message);
-      throw error;
+    const session = this.sessions.get(sessionId); if (!session) throw new Error('Unknown stream session.');
+    const { page, ws, settings } = session;
+    if (!action || typeof action.type !== 'string') throw new Error('Invalid interaction.');
+    switch (action.type) {
+      case 'click': await page.mouse.click(clamp(action.x, 0, settings.width, 0), clamp(action.y, 0, settings.height, 0), { button: action.button === 'right' ? 'right' : 'left' }); break;
+      case 'scroll': await page.evaluate((delta) => window.scrollBy(0, delta), clamp(action.deltaY, -2000, 2000, 0)); break;
+      case 'type': if (typeof action.text === 'string' && action.text.length <= 512) await page.keyboard.type(action.text); break;
+      case 'key': if (typeof action.key === 'string' && /^[A-Za-z0-9+_-]{1,32}$/.test(action.key)) await page.keyboard.press(action.key); break;
+      case 'navigate':
+        if (action.action === 'back') await page.goBack({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+        else if (action.action === 'forward') await page.goForward({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+        else if (action.action === 'reload') await page.reload({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+        else if (action.action === 'goto') await page.goto(normalizeRemoteUrl(action.url), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        else throw new Error('Unsupported navigation.');
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'pageInfo', sessionId, url: page.url(), title: await page.title().catch(() => '') }));
+        break;
+      default: throw new Error('Unsupported interaction.');
     }
   }
-
-  async cleanup() {
-    const sessionIds = Array.from(this.sessions.keys());
-    await Promise.all(sessionIds.map(id => this.stopStream(id)));
-  }
+  async cleanup() { await Promise.all([...this.sessions.keys()].map((id) => this.stopStream(id))); }
 }

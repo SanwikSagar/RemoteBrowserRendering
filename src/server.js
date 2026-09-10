@@ -1,238 +1,68 @@
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { BrowserPool } from './browserPool.js';
-import { StreamManager } from './streamManager.js';
+import { StreamManager, normalizeRemoteUrl } from './streamManager.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// Middleware
-app.use(express.json());
-app.use(express.static(path.join(__dirname, '../public')));
-
-// Initialize browser pool with optimized settings
-const browserPool = new BrowserPool({
-  maxBrowsers: 1,  // Reduced to 1 for free tier (512MB RAM)
-  launchOptions: {
-    headless: 'new',
-    args: [
-      // Core flags
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      
-      // Performance optimizations
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      '--disable-gl-drawing-for-tests',
-      
-      // Memory optimizations
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process', // Use single process for lower memory
-      '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-breakpad',
-      '--disable-client-side-phishing-detection',
-      '--disable-component-extensions-with-background-pages',
-      '--disable-default-apps',
-      '--disable-extensions',
-      '--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process',
-      '--disable-hang-monitor',
-      '--disable-ipc-flooding-protection',
-      '--disable-popup-blocking',
-      '--disable-prompt-on-repost',
-      '--disable-renderer-backgrounding',
-      '--disable-sync',
-      '--force-color-profile=srgb',
-      '--metrics-recording-only',
-      '--no-default-browser-check',
-      '--no-pings',
-      '--password-store=basic',
-      '--use-mock-keychain',
-      '--mute-audio',
-      
-      // Speed optimizations
-      '--disable-web-security', // Faster loading (use with caution)
-      '--disable-features=VizDisplayCompositor',
-      '--disable-threaded-animation',
-      '--disable-threaded-scrolling',
-      '--disable-checker-imaging',
-      '--disable-new-content-rendering-timeout',
-      '--disable-image-animation-resync',
-      '--run-all-compositor-stages-before-draw',
-      '--disable-partial-raster',
-      '--disable-skia-runtime-opts',
-      '--disable-smooth-scrolling',
-      '--disable-frame-rate-limit',
-      
-      // Network optimizations  
-      '--disable-domain-reliability',
-      '--disable-component-update',
-      
-      // Rendering optimizations
-      '--autoplay-policy=user-gesture-required',
-      '--disable-blink-features=AutomationControlled',
-      '--hide-scrollbars',
-      '--ignore-gpu-blacklist'
-    ]
-  }
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
 });
+app.use(express.json({ limit: '16kb' }));
+app.use(express.static(path.join(__dirname, '../public'), { maxAge: '1h', etag: true }));
 
+const browserPool = new BrowserPool({
+  maxBrowsers: Number(process.env.MAX_BROWSERS) || 1,
+  launchOptions: { headless: true, args: [
+    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
+    '--disable-extensions', '--disable-background-networking', '--disable-sync', '--mute-audio',
+    '--no-first-run', '--no-default-browser-check', '--hide-scrollbars', '--force-color-profile=srgb'
+  ] }
+});
 await browserPool.initialize();
 
-// HTTP Routes
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
-});
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/index.html'));
-});
-
-// Start HTTP server
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Remote Browser Rendering Server running on port ${PORT}`);
-  console.log(`📺 Open http://localhost:${PORT} to view the client`);
-});
-
-// WebSocket server for streaming with compression enabled
-const wss = new WebSocketServer({ 
-  server,
-  perMessageDeflate: {
-    zlibDeflateOptions: {
-      chunkSize: 1024,
-      memLevel: 7,
-      level: 3 // Fast compression
-    },
-    zlibInflateOptions: {
-      chunkSize: 10 * 1024
-    },
-    clientNoContextTakeover: true,
-    serverNoContextTakeover: true,
-    serverMaxWindowBits: 10,
-    concurrencyLimit: 10,
-    threshold: 1024 // Only compress messages > 1KB
-  }
-});
+app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
+const server = app.listen(PORT, () => console.log(`Remote Browser Rendering listening on ${PORT}`));
+const wss = new WebSocketServer({ server, maxPayload: 16 * 1024, perMessageDeflate: false });
 const streamManager = new StreamManager(browserPool);
 
 wss.on('connection', (ws) => {
-  console.log('🔌 New WebSocket connection');
-  
-  let sessionId = null;
-  let isProcessing = false;
-
-  ws.on('message', async (message) => {
+  let sessionId = null, starting = false, messages = 0;
+  const resetRate = setInterval(() => { messages = 0; }, 1000);
+  ws.on('message', async (message, isBinary) => {
+    if (isBinary || ++messages > 120 || message.length > 16 * 1024) return ws.close(1008, 'Invalid message rate');
+    let data;
+    try { data = JSON.parse(message.toString()); }
+    catch { return ws.send(JSON.stringify({ type: 'error', message: 'Invalid message.' })); }
     try {
-      const data = JSON.parse(message.toString());
-      console.log('📨 Received message:', data.type);
-      
-      switch (data.type) {
-        case 'start':
-          if (isProcessing) {
-            console.log('⏳ Already processing a start request');
-            return;
-          }
-          
-          isProcessing = true;
-          try {
-            console.log(`🎬 Starting stream for ${data.url}`);
-            sessionId = await streamManager.startStream(data.url, ws, {
-              fps: data.fps || 20,
-              quality: data.quality || 65,
-              width: data.width || 1280,
-              height: data.height || 720
-            });
-            
-            if (ws.readyState === 1) { // OPEN
-              ws.send(JSON.stringify({ type: 'started', sessionId }));
-              console.log(`✅ Stream started: ${sessionId}`);
-            }
-          } catch (error) {
-            console.error('❌ Failed to start stream:', error);
-            if (ws.readyState === 1) {
-              ws.send(JSON.stringify({ 
-                type: 'error', 
-                message: error.message || 'Failed to start stream'
-              }));
-            }
-          } finally {
-            isProcessing = false;
-          }
-          break;
-          
-        case 'stop':
-          if (sessionId) {
-            try {
-              await streamManager.stopStream(sessionId);
-              sessionId = null;
-              if (ws.readyState === 1) {
-                ws.send(JSON.stringify({ type: 'stopped' }));
-              }
-            } catch (error) {
-              console.error('Error stopping stream:', error);
-            }
-          }
-          break;
-          
-        case 'interact':
-          if (sessionId && data.action) {
-            try {
-              await streamManager.handleInteraction(sessionId, data.action);
-            } catch (error) {
-              console.error('Interaction error:', error);
-            }
-          }
-          break;
-          
-        default:
-          if (ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Unknown command' }));
-          }
-      }
+      if (data.type === 'start') {
+        if (starting) return;
+        starting = true;
+        if (sessionId) await streamManager.stopStream(sessionId);
+        sessionId = await streamManager.startStream(normalizeRemoteUrl(data.url), ws, data);
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'started', sessionId }));
+      } else if (data.type === 'stop' && data.sessionId === sessionId) {
+        await streamManager.stopStream(sessionId); sessionId = null;
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stopped' }));
+      } else if (data.type === 'update' && data.sessionId === sessionId) {
+        streamManager.updateStream(sessionId, data);
+      } else if (data.type === 'interact' && data.sessionId === sessionId) {
+        await streamManager.handleInteraction(sessionId, data.action);
+      } else throw new Error('Invalid session or command.');
     } catch (error) {
-      console.error('❌ WebSocket message error:', error);
-      if (ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'error', message: error.message }));
-      }
-    }
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'error', message: error.message || 'Request failed.' }));
+    } finally { starting = false; }
   });
-
-  ws.on('close', async () => {
-    console.log('🔌 WebSocket disconnected');
-    if (sessionId) {
-      try {
-        await streamManager.stopStream(sessionId);
-      } catch (error) {
-        console.error('Error stopping stream on disconnect:', error);
-      }
-    }
-  });
-
-  ws.on('error', (error) => {
-    console.error('❌ WebSocket error:', error);
-  });
+  ws.on('close', async () => { clearInterval(resetRate); if (sessionId) await streamManager.stopStream(sessionId); });
 });
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  await streamManager.cleanup();
-  await browserPool.cleanup();
-  process.exit(0);
-});
-
-process.on('SIGTERM', async () => {
-  console.log('\n🛑 Shutting down gracefully...');
-  await streamManager.cleanup();
-  await browserPool.cleanup();
-  process.exit(0);
-});
+const shutdown = async () => { await streamManager.cleanup(); await browserPool.cleanup(); server.close(); };
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

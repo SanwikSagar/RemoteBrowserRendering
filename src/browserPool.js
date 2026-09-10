@@ -52,40 +52,7 @@ export class BrowserPool {
       // Memory-optimized launch options
       const browser = await puppeteer.launch({
         ...this.launchOptions,
-        args: [
-          ...(this.launchOptions.args || []),
-          // Memory optimization flags
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-accelerated-2d-canvas',
-          '--disable-gl-drawing-for-tests',
-          '--disable-software-rasterizer',
-          // Reduce memory usage
-          '--disable-extensions',
-          '--disable-plugins',
-          '--disable-images', // We only need content, not display
-          '--disable-javascript-harmony-shipping',
-          '--disable-background-networking',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-breakpad',
-          '--disable-component-extensions-with-background-pages',
-          '--disable-features=TranslateUI,BlinkGenPropertyTrees',
-          '--disable-ipc-flooding-protection',
-          '--disable-renderer-backgrounding',
-          '--disable-sync',
-          '--force-color-profile=srgb',
-          '--metrics-recording-only',
-          '--mute-audio',
-          '--no-first-run',
-          '--safebrowsing-disable-auto-update',
-          '--disable-notifications',
-          // Memory limits
-          '--max-old-space-size=512', // Limit V8 heap to 512MB
-          '--js-flags=--max-old-space-size=512',
-        ]
+        args: this.launchOptions.args || []
       });
       
       this.availableBrowsers.push(browser);
@@ -97,24 +64,22 @@ export class BrowserPool {
   }
 
   async acquire() {
-    if (this.availableBrowsers.length === 0) {
-      if (this.busyBrowsers.size < this.maxBrowsers) {
-        await this.createBrowser();
-      } else {
-        // Wait for a browser to become available
-        await new Promise(resolve => setTimeout(resolve, 100));
-        return this.acquire();
-      }
+    // Iteration avoids unbounded recursive calls when every browser is busy.
+    while (this.availableBrowsers.length === 0) {
+      if (this.busyBrowsers.size < this.maxBrowsers) await this.createBrowser();
+      else await new Promise(resolve => setTimeout(resolve, 100));
     }
-
     const browser = this.availableBrowsers.pop();
     this.busyBrowsers.add(browser);
     return browser;
   }
 
   release(browser) {
+    if (!browser || !this.busyBrowsers.has(browser)) {
+      return;
+    }
     this.busyBrowsers.delete(browser);
-    this.availableBrowsers.push(browser);
+    if (browser.connected) this.availableBrowsers.push(browser);
   }
 
   async cleanup() {

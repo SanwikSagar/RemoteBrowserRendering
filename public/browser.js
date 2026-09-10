@@ -1,823 +1,199 @@
 class RemoteBrowserClient {
   constructor() {
-    this.ws = null;
-    this.sessionId = null;
-    this.frameCount = 0;
-    this.fpsCounter = 0;
-    this.lastFpsUpdate = Date.now();
-    this.isStreaming = false;
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 5;
-    this.reconnectDelay = 2000;
-    this.connectionRetryTimeout = null;
-    
-    // Hardware-accelerated upscaling canvas
-    this.upscaleCanvas = null;
-    this.upscaleContext = null;
-    
-    this.isMobile = this.detectMobile();
-    
-    this.viewportWidth = 1280;
-    this.viewportHeight = 720;
-    this.updateViewportSize();
-    
-    this.inputDebounceTimeout = null;
-    this.inputDebounceDelay = 50;
-    
-    this.elements = {
-      urlInput: document.getElementById('urlInput'),
-      fpsInput: document.getElementById('fpsInput'),
-      qualityInput: document.getElementById('qualityInput'),
-      backBtn: document.getElementById('backBtn'),
-      forwardBtn: document.getElementById('forwardBtn'),
-      refreshBtn: document.getElementById('refreshBtn'),
-      homeBtn: document.getElementById('homeBtn'),
-      settingsBtn: document.getElementById('settingsBtn'),
-      settingsMenu: document.getElementById('settingsMenu'),
-      startStreamOption: document.getElementById('startStreamOption'),
-      stopStreamOption: document.getElementById('stopStreamOption'),
-      stream: document.getElementById('stream'),
-      viewport: document.getElementById('viewport'),
-      placeholder: document.getElementById('placeholder'),
-      loadingSpinner: document.getElementById('loadingSpinner'),
-      loadingText: document.getElementById('loadingText'),
-      loadingSubtext: document.getElementById('loadingSubtext'),
-      connectionOverlay: document.getElementById('connectionOverlay'),
-      connectionTitle: document.getElementById('connectionTitle'),
-      connectionSubtitle: document.getElementById('connectionSubtitle'),
-      statusDot: document.getElementById('statusDot'),
-      statusText: document.getElementById('statusText'),
-      currentUrl: document.getElementById('currentUrl'),
-      fpsDisplay: document.getElementById('fpsDisplay'),
-      frameCountEl: document.getElementById('frameCount'),
-      latency: document.getElementById('latency'),
-      loadingBar: document.getElementById('loadingBar'),
-      windowTitle: document.getElementById('windowTitle')
-    };
-
-    this.setupEventListeners();
-    this.setupResponsiveViewport();
-    this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection');
-    this.connect();
+    this.ws = null; this.sessionId = null; this.isStreaming = false;
+    this.frameCount = 0; this.fpsCounter = 0; this.lastFpsUpdate = performance.now();
+    this.reconnectAttempts = 0; this.maxReconnectAttempts = Infinity; this.connectionRetryTimeout = null;
+    this.latestFrame = null; this.renderScheduled = false; this.currentObjectUrl = null; this.startTimeout = null;
+    this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
+    this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions'].map((id) => [id, document.getElementById(id)]));
+    this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
+    this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
   }
 
   detectMobile() {
-    const userAgent = navigator.userAgent || navigator.vendor || window.opera;
-    const isMobileDevice = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent.toLowerCase());
-    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    const isSmallScreen = window.innerWidth <= 768;
-    
-    return isMobileDevice || (isTouchDevice && isSmallScreen);
+    const ua = navigator.userAgent || '';
+    // A narrow rendered viewport is an explicit request for the mobile site. This
+    // also covers desktop Chrome's device toolbar, whose UA can remain desktop.
+    return window.innerWidth <= 768 || /(?:iphone|ipod|android.*mobile|windows phone|iemobile|opera mini)/i.test(ua);
   }
-
   updateViewportSize() {
-    // Calculate optimal viewport based on window size
-    const navHeight = 120; // Approximate combined height of nav bars
-    const statusHeight = 28;
-    const availableWidth = window.innerWidth;
-    const availableHeight = window.innerHeight - navHeight - statusHeight;
-    
-    // Use 16:9 aspect ratio, fit within available space
-    const aspectRatio = 16 / 9;
-    let width = availableWidth;
-    let height = width / aspectRatio;
-    
-    if (height > availableHeight) {
-      height = availableHeight;
-      width = height * aspectRatio;
+    const availableWidth = Math.max(320, window.innerWidth), availableHeight = Math.max(240, window.innerHeight - 150);
+    if (this.detectMobile()) {
+      // Do not convert a phone's tall viewport into a desktop 16:9 rectangle.
+      // Sites use these CSS pixels, together with the mobile UA, to choose layout.
+      this.viewportWidth = Math.round(availableWidth);
+      this.viewportHeight = Math.round(availableHeight);
+      return;
     }
-    
-    // Ensure reasonable minimum and maximum sizes
-    width = Math.max(800, Math.min(width, 1920));
-    height = Math.round(width / aspectRatio);
-    
-    this.viewportWidth = Math.round(width);
-    this.viewportHeight = Math.round(height);
-    
-    console.log(`📐 Viewport size: ${this.viewportWidth}x${this.viewportHeight}`);
+    const ratio = 16 / 9; let width = Math.min(availableWidth, 1920), height = width / ratio;
+    if (height > availableHeight) { height = availableHeight; width = height * ratio; }
+    this.viewportWidth = Math.round(Math.max(320, width)); this.viewportHeight = Math.round(Math.max(240, height));
   }
-
+  restorePreferences() {
+    try {
+      const preferences = JSON.parse(localStorage.getItem('remote-browser-preferences') || '{}');
+      if (preferences.fps) this.elements.fpsInput.value = preferences.fps;
+      if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
+      if (preferences.url) this.elements.urlInput.value = preferences.url;
+    } catch { /* Invalid local storage should never block the browser. */ }
+  }
+  savePreferences() {
+    localStorage.setItem('remote-browser-preferences', JSON.stringify({ fps: this.fps(), quality: this.quality(), url: this.elements.urlInput.value }));
+  }
+  fps() { return this.clampInput(this.elements.fpsInput, 10, 60, 30); }
+  quality() { return this.clampInput(this.elements.qualityInput, 30, 80, 50); }
+  clampInput(input, min, max, fallback) {
+    const value = Number.parseInt(input.value, 10); input.value = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; return Number(input.value);
+  }
   setupResponsiveViewport() {
-    // Update viewport on resize with debounce
-    let resizeTimeout;
-    window.addEventListener('resize', () => {
-      clearTimeout(resizeTimeout);
-      resizeTimeout = setTimeout(() => {
-        this.updateViewportSize();
-        // If streaming, restart with new size
-        if (this.isStreaming) {
-          console.log('📐 Window resized, restarting stream with new viewport...');
-          this.stopStream();
-          setTimeout(() => this.startStream(), 500);
-        }
-      }, 300);
-    });
+    let timer;
+    window.addEventListener('resize', () => { clearTimeout(timer); timer = setTimeout(() => {
+      const wasMobile = this.isMobile, oldWidth = this.viewportWidth, oldHeight = this.viewportHeight;
+      this.isMobile = this.detectMobile(); this.updateViewportSize();
+      // The browser profile and viewport are established at stream start. Restart
+      // only after a meaningful resize or desktop/mobile breakpoint change.
+      if (this.isStreaming && (wasMobile !== this.isMobile || Math.abs(oldWidth - this.viewportWidth) > 80 || Math.abs(oldHeight - this.viewportHeight) > 120)) this.startStream();
+    }, 250); });
   }
-
   setupEventListeners() {
-    // Navigation controls
-    this.elements.backBtn.addEventListener('click', () => this.sendInteraction({ type: 'navigate', action: 'back' }));
-    this.elements.forwardBtn.addEventListener('click', () => this.sendInteraction({ type: 'navigate', action: 'forward' }));
-    this.elements.refreshBtn.addEventListener('click', () => this.navigate(this.elements.urlInput.value));
-    this.elements.homeBtn.addEventListener('click', () => {
-      this.elements.urlInput.value = 'https://www.google.com';
-      this.navigate('https://www.google.com');
-    });
-    
-    // URL input with optimized handling
-    this.elements.urlInput.addEventListener('input', (e) => this.handleUrlInput(e));
-    this.elements.urlInput.addEventListener('keydown', (e) => this.handleUrlKeydown(e));
-    this.elements.urlInput.addEventListener('focus', () => this.showSuggestions());
-    this.elements.urlInput.addEventListener('blur', () => setTimeout(() => this.hideSuggestions(), 200));
-
-    // Settings menu with proper positioning
-    this.elements.settingsBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const isActive = this.elements.settingsMenu.classList.contains('active');
-      
-      if (!isActive) {
-        // Position menu relative to button
-        const rect = this.elements.settingsBtn.getBoundingClientRect();
-        this.elements.settingsMenu.style.top = `${rect.bottom + 4}px`;
-        this.elements.settingsMenu.classList.add('active');
-      } else {
-        this.elements.settingsMenu.classList.remove('active');
-      }
-    });
-
-    // Prevent menu from closing when clicking inside inputs
-    this.elements.settingsMenu.addEventListener('click', (e) => {
-      // Only stop propagation if clicking on inputs or no-hover items
-      if (e.target.tagName === 'INPUT' || e.target.closest('.no-hover')) {
-        e.stopPropagation();
-      }
-    });
-
-    this.elements.startStreamOption.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.startStream();
-      this.elements.settingsMenu.classList.remove('active');
-    });
-
-    this.elements.stopStreamOption.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.stopStream();
-      this.elements.settingsMenu.classList.remove('active');
-    });
-
-    // Fast input handling with validation
-    this.elements.fpsInput.addEventListener('input', (e) => {
-      let value = parseInt(e.target.value);
-      if (value < 10) value = 10;
-      if (value > 30) value = 30;
-      e.target.value = value;
-    });
-
-    this.elements.qualityInput.addEventListener('input', (e) => {
-      let value = parseInt(e.target.value);
-      if (value < 30) value = 30;
-      if (value > 70) value = 70;
-      e.target.value = value;
-    });
-
-    // Close menu when clicking outside
-    document.addEventListener('click', (e) => {
-      if (!this.elements.settingsBtn.contains(e.target) && 
-          !this.elements.settingsMenu.contains(e.target)) {
-        this.elements.settingsMenu.classList.remove('active');
-      }
-    });
-
-    // Stream interactions - optimized for better performance
-    this.elements.stream.addEventListener('click', (e) => this.handleClick(e), { passive: false });
-    this.elements.stream.addEventListener('wheel', (e) => this.handleScroll(e), { passive: false });
-    this.elements.stream.addEventListener('contextmenu', (e) => e.preventDefault());
-    
-    // Keyboard events
-    document.addEventListener('keydown', (e) => this.handleKeyboard(e));
+    const e = this.elements;
+    e.backBtn.addEventListener('click', () => this.sendInteraction({ type: 'navigate', action: 'back' }));
+    e.forwardBtn.addEventListener('click', () => this.sendInteraction({ type: 'navigate', action: 'forward' }));
+    e.refreshBtn.addEventListener('click', () => this.sendInteraction({ type: 'navigate', action: 'reload' }));
+    e.homeBtn.addEventListener('click', () => this.navigate('https://www.google.com'));
+    e.urlInput.addEventListener('input', () => this.updateSuggestions(e.urlInput.value));
+    e.urlInput.addEventListener('focus', () => this.updateSuggestions(e.urlInput.value));
+    e.urlInput.addEventListener('keydown', (event) => this.handleUrlKeydown(event));
+    e.settingsBtn.addEventListener('click', (event) => { event.stopPropagation(); this.toggleSettings(); });
+    e.settingsMenu.addEventListener('click', (event) => event.stopPropagation());
+    e.startStreamOption.addEventListener('click', () => { this.startStream(); this.hideSettings(); });
+    e.stopStreamOption.addEventListener('click', () => { this.stopStream(); this.hideSettings(); });
+    [e.fpsInput, e.qualityInput].forEach((input) => input.addEventListener('change', () => { this.fps(); this.quality(); this.savePreferences(); this.updateSettings(); }));
+    document.addEventListener('pointerdown', (event) => { if (!e.settingsBtn.contains(event.target) && !e.settingsMenu.contains(event.target)) this.hideSettings(); if (!e.urlInput.closest('.url-bar').contains(event.target)) this.hideSuggestions(); });
+    e.stream.addEventListener('click', (event) => this.handleClick(event));
+    e.stream.addEventListener('wheel', (event) => this.handleScroll(event), { passive: false });
+    e.stream.addEventListener('contextmenu', (event) => event.preventDefault());
+    document.addEventListener('keydown', (event) => this.handleKeyboard(event));
   }
-
-  handleUrlInput(e) {
-    const value = e.target.value.trim();
-    
-    if (value.length === 0) {
-      this.hideSuggestions();
-      return;
-    }
-
-    // Clear previous timeout
-    if (this.inputDebounceTimeout) {
-      clearTimeout(this.inputDebounceTimeout);
-    }
-
-    // Show suggestions immediately but debounce the update
-    this.showSuggestions();
-    
-    this.inputDebounceTimeout = setTimeout(() => {
-      this.updateSuggestions(value);
-    }, this.inputDebounceDelay);
+  toggleSettings() {
+    if (this.elements.settingsMenu.classList.contains('active')) return this.hideSettings();
+    const rect = this.elements.settingsBtn.getBoundingClientRect(), menu = this.elements.settingsMenu;
+    menu.classList.add('active');
+    const width = menu.offsetWidth, height = menu.offsetHeight;
+    menu.style.left = `${Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8))}px`;
   }
-
-  handleUrlKeydown(e) {
-    const suggestionsEl = document.getElementById('suggestions');
-    const items = suggestionsEl.querySelectorAll('.suggestion-item');
-    
-    switch (e.key) {
-      case 'Enter':
-        e.preventDefault();
-        const active = suggestionsEl.querySelector('.suggestion-item.active');
-        if (active) {
-          this.navigate(active.dataset.url);
-        } else {
-          this.navigate(this.elements.urlInput.value);
-        }
-        this.hideSuggestions();
-        break;
-        
-      case 'ArrowDown':
-        e.preventDefault();
-        this.highlightSuggestion(1);
-        break;
-        
-      case 'ArrowUp':
-        e.preventDefault();
-        this.highlightSuggestion(-1);
-        break;
-        
-      case 'Escape':
-        e.preventDefault();
-        this.hideSuggestions();
-        break;
-    }
-  }
-
+  hideSettings() { this.elements.settingsMenu.classList.remove('active'); }
   updateSuggestions(query) {
-    const suggestionsEl = document.getElementById('suggestions');
-    const commonSites = [
-      { name: 'Google', url: 'https://www.google.com' },
-      { name: 'YouTube', url: 'https://www.youtube.com' },
-      { name: 'Wikipedia', url: 'https://www.wikipedia.org' },
-      { name: 'GitHub', url: 'https://www.github.com' },
-      { name: 'Stack Overflow', url: 'https://stackoverflow.com' },
-      { name: 'Reddit', url: 'https://www.reddit.com' },
-      { name: 'Amazon', url: 'https://www.amazon.com' },
-      { name: 'Gmail', url: 'https://mail.google.com' },
-      { name: 'Facebook', url: 'https://www.facebook.com' },
-      { name: 'Twitter', url: 'https://twitter.com' }
-    ];
-
-    const lowerQuery = query.toLowerCase();
-    
-    // Filter suggestions
-    const filtered = commonSites.filter(site => 
-      site.name.toLowerCase().includes(lowerQuery) ||
-      site.url.includes(query)
-    ).slice(0, 8);
-
-    // Add search option
-    const suggestions = [
-      {
-        name: `Search Google for "${query}"`,
-        url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
-        type: 'search'
-      },
-      ...filtered.map(site => ({ ...site, type: 'site' }))
-    ];
-
-    suggestionsEl.innerHTML = suggestions.map((s, idx) => `
-      <div class="suggestion-item" data-url="${s.url}" data-index="${idx}">
-        <svg class="suggestion-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          ${s.type === 'search' ? 
-            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>' :
-            '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.658 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>'
-          }
-        </svg>
-        <span class="suggestion-text">${s.name}</span>
-        <span class="suggestion-type">${s.type === 'search' ? 'Search' : 'Site'}</span>
-      </div>
-    `).join('');
-
-    // Add click handlers
-    suggestionsEl.querySelectorAll('.suggestion-item').forEach(item => {
-      item.addEventListener('click', () => {
-        this.navigate(item.dataset.url);
-        this.hideSuggestions();
-      });
-    });
-  }
-
-  highlightSuggestion(direction) {
-    const suggestionsEl = document.getElementById('suggestions');
-    const items = Array.from(suggestionsEl.querySelectorAll('.suggestion-item'));
-    const active = suggestionsEl.querySelector('.suggestion-item.active');
-    
-    if (items.length === 0) return;
-
-    let nextIndex = 0;
-    if (active) {
-      const currentIndex = items.indexOf(active);
-      nextIndex = Math.max(0, Math.min(currentIndex + direction, items.length - 1));
-      active.classList.remove('active');
-    }
-
-    items[nextIndex].classList.add('active');
-    items[nextIndex].scrollIntoView({ 
-      block: 'nearest',
-      behavior: 'smooth'
-    });
-  }
-
-  showSuggestions() {
-    document.getElementById('suggestions').classList.add('active');
-  }
-
-  hideSuggestions() {
-    document.getElementById('suggestions').classList.remove('active');
-  }
-
-  showLoadingSpinner(text = 'Loading page...', subtext = 'This may take 10-30 seconds for heavy sites') {
-    this.elements.loadingText.textContent = text;
-    this.elements.loadingSubtext.textContent = subtext;
-    this.elements.loadingSpinner.classList.add('active');
-    this.elements.placeholder.style.display = 'none';
-    this.elements.loadingBar.classList.add('active');
-  }
-
-  hideLoadingSpinner() {
-    this.elements.loadingSpinner.classList.remove('active');
-    this.elements.loadingBar.classList.remove('active');
-  }
-
-  updateProgressBar(percentage) {
-    this.elements.loadingBar.style.width = `${Math.min(percentage, 100)}%`;
-    if (!this.elements.loadingBar.classList.contains('active')) {
-      this.elements.loadingBar.classList.add('active');
-    }
-  }
-
-  showConnectionOverlay(title, subtitle) {
-    this.elements.connectionTitle.textContent = title;
-    this.elements.connectionSubtitle.textContent = subtitle;
-    this.elements.connectionOverlay.classList.add('active');
-  }
-
-  hideConnectionOverlay() {
-    this.elements.connectionOverlay.classList.remove('active');
-  }
-
-  handleClick(e) {
-    if (!this.isStreaming) return;
-    
-    e.preventDefault();
-    const rect = this.elements.stream.getBoundingClientRect();
-    const scaleX = this.viewportWidth / rect.width;
-    const scaleY = this.viewportHeight / rect.height;
-    
-    const x = Math.round((e.clientX - rect.left) * scaleX);
-    const y = Math.round((e.clientY - rect.top) * scaleY);
-
-    this.sendInteraction({
-      type: 'click',
-      x,
-      y,
-      button: e.button === 2 ? 'right' : 'left'
-    });
-  }
-
-  handleScroll(e) {
-    if (!this.isStreaming) return;
-    
-    e.preventDefault();
-    this.sendInteraction({
-      type: 'scroll',
-      deltaY: e.deltaY
-    });
-  }
-
-  handleKeyboard(e) {
-    if (e.target === this.elements.urlInput) return;
-
-    const specialKeys = ['Enter', 'Backspace', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
-    
-    if (specialKeys.includes(e.key)) {
-      e.preventDefault();
-      this.sendInteraction({ type: 'key', key: e.key });
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-      e.preventDefault();
-      this.sendInteraction({ type: 'type', text: e.key });
-    }
-  }
-
-  navigate(url) {
-    if (!url) return;
-
-    const finalUrl = url.startsWith('http') ? url : 
-                     url.includes('.') ? `https://${url}` : 
-                     `https://www.google.com/search?q=${encodeURIComponent(url)}`;
-    
-    this.elements.urlInput.value = finalUrl;
-
-    if (!this.isStreaming) {
-      this.startStream();
-      return;
-    }
-
-    this.showLoadingSpinner('Navigating...', 'Loading new page');
-
-    this.sendInteraction({
-      type: 'navigate',
-      action: 'goto',
-      url: finalUrl
-    });
-  }
-
-  sendInteraction(action) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.sessionId) {
-      return;
-    }
-
-    this.ws.send(JSON.stringify({
-      type: 'interact',
-      sessionId: this.sessionId,
-      action
+    const suggestions = this.elements.suggestions, cleanQuery = query.trim();
+    if (!cleanQuery) return this.hideSuggestions();
+    const sites = [['Google','https://www.google.com'],['YouTube','https://www.youtube.com'],['Wikipedia','https://www.wikipedia.org'],['GitHub','https://github.com'],['Stack Overflow','https://stackoverflow.com']]
+      .filter(([name, url]) => name.toLowerCase().includes(cleanQuery.toLowerCase()) || url.includes(cleanQuery.toLowerCase()));
+    const entries = [[`Search Google for “${cleanQuery}”`, `https://www.google.com/search?q=${encodeURIComponent(cleanQuery)}`, 'Search'], ...sites.map(([name, url]) => [name, url, 'Site'])];
+    suggestions.replaceChildren(...entries.slice(0, 8).map(([name, url, type]) => {
+      const item = document.createElement('button'); item.type = 'button'; item.className = 'suggestion-item'; item.dataset.url = url;
+      const text = document.createElement('span'); text.className = 'suggestion-text'; text.textContent = name;
+      const kind = document.createElement('span'); kind.className = 'suggestion-type'; kind.textContent = type;
+      item.append(text, kind); item.addEventListener('click', () => this.navigate(url)); return item;
     }));
+    suggestions.classList.add('active');
   }
-
+  handleUrlKeydown(event) {
+    const items = [...this.elements.suggestions.querySelectorAll('.suggestion-item')], active = this.elements.suggestions.querySelector('.active');
+    if (event.key === 'Enter') { event.preventDefault(); this.navigate(active?.dataset.url || this.elements.urlInput.value); return; }
+    if (event.key === 'Escape') return this.hideSuggestions();
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key) || !items.length) return;
+    event.preventDefault(); const index = active ? items.indexOf(active) : -1;
+    active?.classList.remove('active'); items[(index + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].classList.add('active');
+  }
+  showLoadingSpinner(text, subtext) { this.elements.loadingText.textContent = text; this.elements.loadingSubtext.textContent = subtext; this.elements.loadingSpinner.classList.add('active'); this.elements.loadingBar.classList.add('active'); this.elements.placeholder.style.display = 'none'; }
+  hideLoadingSpinner() { this.elements.loadingSpinner.classList.remove('active'); this.elements.loadingBar.classList.remove('active'); this.elements.loadingBar.style.width = '0%'; }
+  updateProgressBar(progress) { this.elements.loadingBar.classList.add('active'); this.elements.loadingBar.style.width = `${Math.min(100, Math.max(0, progress))}%`; }
+  showConnectionOverlay(title, subtitle) { this.elements.connectionTitle.textContent = title; this.elements.connectionSubtitle.textContent = subtitle; this.elements.connectionOverlay.classList.add('active'); }
+  hideConnectionOverlay() { this.elements.connectionOverlay.classList.remove('active'); }
+  handleClick(event) {
+    if (!this.isStreaming) return; event.preventDefault(); const rect = this.elements.stream.getBoundingClientRect();
+    this.sendInteraction({ type: 'click', x: Math.round((event.clientX - rect.left) * this.viewportWidth / rect.width), y: Math.round((event.clientY - rect.top) * this.viewportHeight / rect.height), button: 'left' });
+  }
+  handleScroll(event) { if (!this.isStreaming) return; event.preventDefault(); this.sendInteraction({ type: 'scroll', deltaY: Math.round(event.deltaY) }); }
+  handleKeyboard(event) {
+    if (event.target === this.elements.urlInput || !this.isStreaming) return;
+    if ((event.ctrlKey || event.metaKey) && ['c','v','a','x'].includes(event.key.toLowerCase())) { event.preventDefault(); this.sendInteraction({ type: 'key', key: `${event.ctrlKey ? 'Control' : 'Meta'}+${event.key.toUpperCase()}` }); return; }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'r') { event.preventDefault(); this.sendInteraction({ type: 'navigate', action: 'reload' }); return; }
+    if (['Enter','Backspace','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Delete'].includes(event.key)) { event.preventDefault(); this.sendInteraction({ type: 'key', key: event.key }); }
+    else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); this.sendInteraction({ type: 'type', text: event.key }); }
+  }
+  normalizeUrl(value) {
+    const text = String(value || '').trim(); if (!text) throw new Error('Enter a URL or search term.');
+    if (/\s/.test(text) || !/[.:]/.test(text)) return `https://www.google.com/search?q=${encodeURIComponent(text)}`;
+    const url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
+    if (!['http:','https:'].includes(url.protocol) || url.username || url.password) throw new Error('Only HTTP and HTTPS URLs are supported.');
+    return url.toString();
+  }
+  navigate(value) {
+    let url; try { url = this.normalizeUrl(value); } catch (error) { this.showNotification(error.message, 'error'); return; }
+    this.elements.urlInput.value = url; this.savePreferences(); this.hideSuggestions();
+    if (!this.isStreaming) return this.startStream();
+    this.showLoadingSpinner('Navigating...', 'Loading new page'); this.sendInteraction({ type: 'navigate', action: 'goto', url });
+  }
   connect() {
-    if (this.connectionRetryTimeout) {
-      clearTimeout(this.connectionRetryTimeout);
-    }
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
-    
-    console.log(`Connecting to ${wsUrl}...`);
-    
-    try {
-      this.ws = new WebSocket(wsUrl);
-      this.ws.binaryType = 'arraybuffer';
-    } catch (error) {
-      console.error('Failed to create WebSocket:', error);
-      this.handleConnectionFailure();
-      return;
-    }
-
-    this.ws.onopen = () => {
-      console.log('WebSocket connected');
-      this.reconnectAttempts = 0;
-      this.updateStatus('connected', 'Connected');
-      this.hideConnectionOverlay();
-    };
-
-    this.ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        this.handleMessage(data);
-      } catch (error) {
-        console.error('Failed to parse message:', error);
-      }
-    };
-
-    this.ws.onclose = () => {
-      console.log('WebSocket disconnected');
-      this.updateStatus('disconnected', 'Disconnected');
-      
-      if (this.isStreaming) {
-        this.showConnectionOverlay('Connection Lost', 'Attempting to reconnect...');
-      }
-      
-      this.handleConnectionFailure();
-    };
-
-    this.ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
+    clearTimeout(this.connectionRetryTimeout); const scheme = window.location.protocol === 'https:' || window.location.hostname !== 'localhost' ? 'wss:' : 'ws:';
+    this.ws = new WebSocket(`${scheme}//${window.location.host}`); this.ws.binaryType = 'arraybuffer';
+    this.ws.onopen = () => { this.reconnectAttempts = 0; this.updateStatus('connected', 'Connected'); this.hideConnectionOverlay(); };
+    this.ws.onmessage = (event) => { if (event.data instanceof ArrayBuffer) this.receiveFrame(event.data); else { try { this.handleMessage(JSON.parse(event.data)); } catch { /* ignore malformed response */ } } };
+    this.ws.onclose = () => { this.updateStatus('disconnected', 'Disconnected'); if (this.isStreaming) { this.isStreaming = false; this.sessionId = null; } this.retryConnection(); };
+    this.ws.onerror = () => {};
   }
-
-  handleConnectionFailure() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      const delay = this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts);
-      this.reconnectAttempts++;
-      
-      console.log(`Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
-      
-      this.showConnectionOverlay(
-        'Reconnecting...',
-        `Attempt ${this.reconnectAttempts} of ${this.maxReconnectAttempts} - Please wait`
-      );
-      
-      this.connectionRetryTimeout = setTimeout(() => this.connect(), delay);
-    } else {
-      console.error('Max reconnection attempts reached');
-      this.updateStatus('disconnected', 'Connection Failed');
-      this.showConnectionOverlay(
-        'Connection Failed',
-        'Unable to connect to server. Please refresh the page to try again.'
-      );
-    }
+  retryConnection() {
+    const delay = Math.min(20_000, 500 * (2 ** Math.min(this.reconnectAttempts++, 6))) + Math.floor(Math.random() * 250);
+    this.showConnectionOverlay('Reconnecting...', `Trying again in ${Math.ceil(delay / 1000)} seconds`); this.connectionRetryTimeout = setTimeout(() => this.connect(), delay);
   }
-
-  handleMessage(data) {
-    switch (data.type) {
-      case 'started':
-        this.sessionId = data.sessionId;
-        this.isStreaming = true;
-        console.log(`Stream started with session ID: ${this.sessionId}`);
-        this.updateStatus('streaming', 'Streaming');
-        this.enableNavigation(true);
-        this.elements.placeholder.style.display = 'none';
-        this.elements.startStreamOption.style.display = 'none';
-        this.elements.stopStreamOption.style.display = 'flex';
-        this.updateProgressBar(10);
-        this.showLoadingSpinner('Loading page...', 'Please wait, this may take up to 30 seconds');
-        break;
-
-      case 'progress':
-        this.updateProgressBar(data.progress);
-        if (data.message) {
-          this.elements.loadingText.textContent = data.message;
-        }
-        if (data.subtext) {
-          this.elements.loadingSubtext.textContent = data.subtext;
-        }
-        
-        if (data.progress >= 100) {
-          setTimeout(() => {
-            if (this.frameCount > 0) {
-              this.hideLoadingSpinner();
-              this.elements.loadingBar.classList.remove('active');
-            }
-          }, 500);
-        }
-        break;
-
-      case 'frame':
-        this.renderFrameInstant(data);
-        break;
-
-      case 'pageInfo':
-        if (data.url) {
-          this.elements.currentUrl.textContent = this.truncateUrl(data.url);
-          this.elements.urlInput.value = data.url;
-          this.elements.windowTitle.textContent = data.title || 'Zar Browser';
-        }
-        break;
-
-      case 'stopped':
-        console.log('Stream stopped');
-        this.resetStream();
-        break;
-
-      case 'error':
-        console.error('Server error:', data.message);
-        this.hideLoadingSpinner();
-        this.updateProgressBar(0);
-        this.elements.loadingBar.classList.remove('active');
-        this.showNotification(`Error: ${data.message}`, 'error');
-        break;
-    }
-  }
-
-  renderFrameInstant(data) {
-    // Initialize hardware-accelerated upscaling canvas once
-    if (!this.upscaleCanvas) {
-      this.upscaleCanvas = document.createElement('canvas');
-      this.upscaleCanvas.width = data.targetWidth || this.viewportWidth;
-      this.upscaleCanvas.height = data.targetHeight || this.viewportHeight;
-      this.upscaleContext = this.upscaleCanvas.getContext('2d', {
-        alpha: false,
-        desynchronized: true,
-        willReadFrequently: false
-      });
-      // Enable image smoothing for better upscaling
-      this.upscaleContext.imageSmoothingEnabled = true;
-      this.upscaleContext.imageSmoothingQuality = 'high';
-    }
-
-    // Decode base64 and create image instantly
-    const img = new Image();
-    
-    img.onload = () => {
-      // Hardware-accelerated upscaling via canvas
-      this.upscaleContext.drawImage(
-        img, 
-        0, 0, data.width, data.height,                              // Source dimensions
-        0, 0, data.targetWidth || this.viewportWidth, 
-        data.targetHeight || this.viewportHeight                     // Target dimensions (upscaled)
-      );
-      
-      // Convert to blob and display
-      this.upscaleCanvas.toBlob((blob) => {
-        // Clean up old blob URL
-        const oldSrc = this.elements.stream.src;
-        if (oldSrc && oldSrc.startsWith('blob:')) {
-          URL.revokeObjectURL(oldSrc);
-        }
-        
-        const url = URL.createObjectURL(blob);
-        this.elements.stream.src = url;
-        
-        // Update stats
-        this.frameCount++;
-        this.fpsCounter++;
-        this.elements.frameCountEl.textContent = this.frameCount;
-
-        const now = Date.now();
-        const elapsed = now - this.lastFpsUpdate;
-        if (elapsed >= 1000) {
-          const fps = Math.round((this.fpsCounter / elapsed) * 1000);
-          this.elements.fpsDisplay.textContent = `${fps} FPS`;
-          this.fpsCounter = 0;
-          this.lastFpsUpdate = now;
-        }
-
-        const latency = Date.now() - data.timestamp;
-        this.elements.latency.textContent = `${latency}ms`;
-
-        if (this.frameCount === 1) {
-          this.hideLoadingSpinner();
-          this.updateProgressBar(100);
-          
-          setTimeout(() => {
-            this.elements.loadingBar.classList.remove('active');
-            this.elements.loadingBar.style.width = '0%';
-          }, 200);
-          
-          this.elements.stream.classList.add('active');
-        }
-      }, 'image/webp', 0.92);
-    };
-    
-    img.onerror = () => {
-      console.error('Failed to decode frame');
-    };
-    
-    img.src = `data:image/webp;base64,${data.frame}`;
-  }
-
-  cleanupMemory() {
-    // Suggest garbage collection (browser decides)
-    if (window.gc && typeof window.gc === 'function') {
-      window.gc();
-    }
-  }
-
+  updateSettings() { if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'update', sessionId: this.sessionId, fps: this.fps(), quality: this.quality() })); }
   startStream() {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.showConnectionOverlay('Connecting...', 'Please wait while we connect to the server');
-      setTimeout(() => {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.startStream();
-        }
-      }, 1000);
-      return;
-    }
-
-    const url = this.elements.urlInput.value.trim() || 'https://www.google.com';
-    const finalUrl = url.startsWith('http') ? url : 
-                     url.includes('.') ? `https://${url}` : 
-                     url;
-
-    // Validate and clamp input values
-    let fps = parseInt(this.elements.fpsInput.value) || 30;
-    fps = Math.max(10, Math.min(fps, 60)); // Allow up to 60 FPS
-    this.elements.fpsInput.value = fps;
-
-    let quality = parseInt(this.elements.qualityInput.value) || 45;
-    quality = Math.max(30, Math.min(quality, 70));
-    this.elements.qualityInput.value = quality;
-
-    console.log(`Starting stream for ${finalUrl}`);
-    console.log(`Settings: ${fps} FPS, ${quality}% quality, ${this.viewportWidth}x${this.viewportHeight}, Mobile: ${this.isMobile}`);
-
-    try {
-      this.ws.send(JSON.stringify({
-        type: 'start',
-        url: finalUrl,
-        fps,
-        quality,
-        width: this.viewportWidth,
-        height: this.viewportHeight,
-        isMobile: this.isMobile
-      }));
-
-      this.frameCount = 0;
-      this.fpsCounter = 0;
-      this.lastFpsUpdate = Date.now();
-      this.frameQueue = [];
-      
-      this.showLoadingSpinner(
-        'Starting browser...',
-        'Loading page, please wait'
-      );
-    } catch (error) {
-      console.error('Failed to start stream:', error);
-      this.showNotification('Failed to start stream. Please try again.', 'error');
-    }
+    if (this.ws?.readyState !== WebSocket.OPEN) return this.showConnectionOverlay('Connecting...', 'The server connection is being restored');
+    let url; try { url = this.normalizeUrl(this.elements.urlInput.value || 'https://www.google.com'); } catch (error) { return this.showNotification(error.message, 'error'); }
+    this.elements.urlInput.value = url; this.savePreferences(); this.frameCount = this.fpsCounter = 0; this.showLoadingSpinner('Starting browser...', 'Loading page');
+    this.ws.send(JSON.stringify({ type: 'start', url, fps: this.fps(), quality: this.quality(), width: this.viewportWidth, height: this.viewportHeight, isMobile: this.isMobile }));
+    clearTimeout(this.startTimeout); this.startTimeout = setTimeout(() => { if (!this.isStreaming) this.showNotification('The stream is taking longer than expected. Please try again.', 'error'); }, 45_000);
   }
-
-  stopStream() {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return;
-    }
-
-    console.log('🛑 Stopping stream');
-    this.ws.send(JSON.stringify({ type: 'stop' }));
-    this.hideLoadingSpinner();
-    this.frameQueue = [];
+  stopStream() { if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'stop', sessionId: this.sessionId })); else this.resetStream(); }
+  sendInteraction(action) { if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'interact', sessionId: this.sessionId, action })); }
+  handleMessage(data) {
+    if (data.type === 'started') { this.sessionId = data.sessionId; this.isStreaming = true; clearTimeout(this.startTimeout); this.enableNavigation(true); this.elements.startStreamOption.style.display = 'none'; this.elements.stopStreamOption.style.display = 'flex'; this.updateStatus('streaming', 'Streaming'); }
+    if (data.type === 'progress') { this.updateProgressBar(data.progress); if (data.message) this.elements.loadingText.textContent = data.message; if (data.subtext) this.elements.loadingSubtext.textContent = data.subtext; }
+    if (data.type === 'pageInfo' && data.url) { this.elements.currentUrl.textContent = this.truncateUrl(data.url); this.elements.currentUrl.title = data.url; this.elements.urlInput.value = data.url; this.elements.windowTitle.textContent = data.title || 'Zar Browser'; }
+    if (data.type === 'stopped') this.resetStream();
+    if (data.type === 'error') { this.hideLoadingSpinner(); this.showNotification(data.message || 'Request failed.', 'error'); }
   }
-
+  receiveFrame(buffer) {
+    if (buffer.byteLength < 18 || new DataView(buffer).getUint8(0) !== 1) return;
+    const view = new DataView(buffer); this.latestFrame = { timestamp: view.getFloat64(5), image: new Blob([buffer.slice(17)], { type: 'image/webp' }) };
+    if (!this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
+  }
+  renderLatestFrame() {
+    this.renderScheduled = false; const frame = this.latestFrame; this.latestFrame = null; if (!frame) return;
+    const url = URL.createObjectURL(frame.image), image = this.elements.stream;
+    image.onload = () => { const previous = this.currentObjectUrl; this.currentObjectUrl = url; if (previous) URL.revokeObjectURL(previous); this.recordFrame(frame.timestamp); };
+    image.onerror = () => URL.revokeObjectURL(url); image.src = url;
+    if (this.latestFrame && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
+  }
+  recordFrame(timestamp) {
+    this.frameCount++; this.fpsCounter++; this.elements.frameCount.textContent = `${this.frameCount} frames`; const now = performance.now(), elapsed = now - this.lastFpsUpdate;
+    if (elapsed >= 1000) { this.elements.fpsDisplay.textContent = `${Math.round(this.fpsCounter * 1000 / elapsed)} FPS`; this.fpsCounter = 0; this.lastFpsUpdate = now; }
+    this.elements.latency.textContent = `${Math.max(0, Math.round(Date.now() - timestamp))}ms`; this.elements.stream.classList.add('active'); this.hideLoadingSpinner();
+  }
   resetStream() {
-    this.sessionId = null;
-    this.isStreaming = false;
-    
-    // Clean up upscale canvas
-    if (this.upscaleCanvas) {
-      this.upscaleContext = null;
-      this.upscaleCanvas = null;
-    }
-    
-    this.enableNavigation(false);
-    this.elements.stream.classList.remove('active');
-    
-    if (this.elements.stream.src && this.elements.stream.src.startsWith('blob:')) {
-      URL.revokeObjectURL(this.elements.stream.src);
-    }
-    this.elements.stream.src = '';
-    
-    this.elements.placeholder.style.display = 'block';
-    this.hideLoadingSpinner();
-    this.updateStatus('connected', 'Connected');
-    this.elements.fpsDisplay.textContent = '0 FPS';
-    this.elements.currentUrl.textContent = '-';
-    this.elements.windowTitle.textContent = 'Zar Browser';
-    this.frameCount = 0;
-    this.elements.startStreamOption.style.display = 'flex';
-    this.elements.stopStreamOption.style.display = 'none';
-    
-    this.cleanupMemory();
+    clearTimeout(this.startTimeout); this.sessionId = null; this.isStreaming = false; this.latestFrame = null; this.enableNavigation(false); this.elements.stream.classList.remove('active');
+    if (this.currentObjectUrl) URL.revokeObjectURL(this.currentObjectUrl); this.currentObjectUrl = null; this.elements.stream.removeAttribute('src'); this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
+    this.elements.startStreamOption.style.display = 'flex'; this.elements.stopStreamOption.style.display = 'none'; this.updateStatus('connected', 'Connected');
   }
-
-  enableNavigation(enabled) {
-    this.elements.backBtn.disabled = !enabled;
-    this.elements.forwardBtn.disabled = !enabled;
-    this.elements.refreshBtn.disabled = !enabled;
-    this.elements.homeBtn.disabled = !enabled;
-  }
-
-  updateStatus(type, text) {
-    this.elements.statusText.textContent = text;
-    this.elements.statusDot.className = `status-dot ${type === 'connected' || type === 'streaming' ? '' : 'disconnected'}`;
-  }
-
-  truncateUrl(url) {
-    const maxLength = 60;
-    return url.length > maxLength ? url.substring(0, maxLength) + '...' : url;
-  }
-
-  showNotification(message, type = 'info') {
-    const notification = document.createElement('div');
-    notification.style.cssText = `
-      position: fixed;
-      top: 60px;
-      right: 20px;
-      padding: 16px 24px;
-      background: ${type === 'error' ? '#ef4444' : type === 'warning' ? '#f59e0b' : '#3b82f6'};
-      color: white;
-      border-radius: 8px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-      z-index: 10000;
-      font-size: 14px;
-      max-width: 400px;
-      animation: slideIn 0.3s ease;
-      line-height: 1.5;
-    `;
-    notification.textContent = message;
-    document.body.appendChild(notification);
-
-    setTimeout(() => {
-      notification.style.animation = 'slideOut 0.3s ease';
-      setTimeout(() => notification.remove(), 300);
-    }, 5000);
-  }
+  enableNavigation(enabled) { ['backBtn','forwardBtn','refreshBtn','homeBtn'].forEach((key) => { this.elements[key].disabled = !enabled; }); }
+  updateStatus(type, text) { this.elements.statusText.textContent = text; this.elements.statusDot.className = `status-dot ${type === 'disconnected' ? 'disconnected' : ''}`; }
+  truncateUrl(url) { return url.length > 60 ? `${url.slice(0, 60)}…` : url; }
+  hideSuggestions() { this.elements.suggestions.classList.remove('active'); }
+  showNotification(message, type = 'info') { const n = document.createElement('div'); n.className = `notification ${type}`; n.textContent = message; document.body.append(n); setTimeout(() => n.remove(), 5000); }
 }
 
-// Add animation styles
 const style = document.createElement('style');
-style.textContent = `
-  @keyframes slideIn {
-    from { transform: translateX(400px); opacity: 0; }
-    to { transform: translateX(0); opacity: 1; }
-  }
-
-  @keyframes slideOut {
-    from { transform: translateX(0); opacity: 1; }
-    to { transform: translateX(400px); opacity: 0; }
-  }
-`;
-document.head.appendChild(style);
-
-// Initialize client when page loads
-document.addEventListener('DOMContentLoaded', () => {
-  new RemoteBrowserClient();
-});
+style.textContent = '.notification{position:fixed;top:60px;right:20px;z-index:10000;max-width:400px;padding:12px 16px;border-radius:8px;background:#3b82f6;color:#fff;box-shadow:0 4px 12px #0004}.notification.error{background:#dc2626}.suggestion-item{width:100%;border:0;background:transparent;text-align:left;cursor:pointer;display:flex;gap:8px;align-items:center}.suggestion-item.active,.suggestion-item:hover{background:#f1f3f4}'; document.head.append(style);
+document.addEventListener('DOMContentLoaded', () => new RemoteBrowserClient());
