@@ -24,6 +24,7 @@ const browserPool = new BrowserPool({
   launchOptions: { headless: true, args: [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
     '--disable-extensions', '--disable-background-networking', '--disable-sync', '--mute-audio',
+    '--autoplay-policy=no-user-gesture-required',
     '--no-first-run', '--no-default-browser-check', '--hide-scrollbars', '--force-color-profile=srgb'
   ] }
 });

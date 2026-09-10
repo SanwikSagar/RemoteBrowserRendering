@@ -24,9 +24,11 @@ export class StreamManager {
   async startStream(rawUrl, ws, options = {}) {
     const url = normalizeRemoteUrl(rawUrl), sessionId = randomUUID();
     const settings = {
-      fps: clamp(options.fps, 10, 60, 30), quality: clamp(options.quality, 30, 80, 50),
+      // A small, highly-compressed source frame is much cheaper to encode and
+      // transfer; the client lets its native compositor scale it to the viewport.
+      fps: clamp(options.fps, 8, 30, 20), quality: clamp(options.quality, 20, 60, 38),
       width: clamp(options.width, 320, MAX_WIDTH, 1280), height: clamp(options.height, 240, MAX_HEIGHT, 720),
-      isMobile: Boolean(options.isMobile)
+      isMobile: Boolean(options.isMobile), renderScale: Boolean(options.isMobile) ? 0.75 : 0.6
     };
     const send = (message) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(message));
     let browser, page;
@@ -48,10 +50,12 @@ export class StreamManager {
       await page.setRequestInterception(true);
       page.on('request', (request) => {
         const type = request.resourceType(), requestUrl = request.url().toLowerCase();
-        const blocked = type === 'media' || type === 'font' || /(?:doubleclick|google-analytics|\/analytics|\/tracking|facebook\.com\/tr|adsystem)/.test(requestUrl);
+        // Do not block media: video segments are required for YouTube and other
+        // streaming sites. Fonts and known telemetry remain safe to skip.
+        const blocked = type === 'font' || /(?:doubleclick|google-analytics|\/analytics|\/tracking|facebook\.com\/tr|adsystem)/.test(requestUrl);
         (blocked ? request.abort() : request.continue()).catch(() => {});
       });
-      await page.evaluateOnNewDocument(() => { window.Notification = undefined; window.RTCPeerConnection = undefined; window.indexedDB = undefined; });
+      await page.evaluateOnNewDocument(() => { window.Notification = undefined; });
       send({ type: 'progress', progress: 30, message: 'Navigating to page...', subtext: 'Loading content' });
       await Promise.race([
         page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
@@ -59,6 +63,7 @@ export class StreamManager {
       ]).catch((error) => { if (page.url() === 'about:blank') throw error; });
       send({ type: 'pageInfo', sessionId, url: page.url(), title: await page.title().catch(() => '') });
       send({ type: 'progress', progress: 95, message: 'Streaming started', subtext: 'Ready' });
+      const cdp = await page.target().createCDPSession();
       let active = true, frameNumber = 0, consecutiveErrors = 0;
       const streamLoop = async () => {
         if (!active || page.isClosed()) return;
@@ -66,10 +71,18 @@ export class StreamManager {
         try {
           // Keep latency bounded: discard frames while the network is behind.
           if (ws.readyState === ws.OPEN && ws.bufferedAmount < MAX_BUFFERED_BYTES) {
-            const image = await page.screenshot({ type: 'webp', quality: settings.quality, optimizeForSpeed: true });
+            // Chrome captures directly at the smaller scale. This avoids a
+            // full-size image buffer and expensive server-side resizing.
+            const capture = await cdp.send('Page.captureScreenshot', {
+              format: 'webp', quality: settings.quality, optimizeForSpeed: true,
+              clip: { x: 0, y: 0, width: settings.width, height: settings.height, scale: settings.renderScale },
+              captureBeyondViewport: false
+            });
+            const image = Buffer.from(capture.data, 'base64');
             const header = Buffer.allocUnsafe(17);
             header.writeUInt8(1, 0); header.writeUInt32BE(frameNumber++, 1); header.writeDoubleBE(startedAt, 5);
-            header.writeUInt16BE(settings.width, 13); header.writeUInt16BE(settings.height, 15);
+            header.writeUInt16BE(Math.round(settings.width * settings.renderScale), 13);
+            header.writeUInt16BE(Math.round(settings.height * settings.renderScale), 15);
             ws.send(Buffer.concat([header, image]), { binary: true, compress: false });
           }
           consecutiveErrors = 0;
@@ -93,8 +106,8 @@ export class StreamManager {
   updateStream(sessionId, changes = {}) {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Unknown stream session.');
-    session.settings.fps = clamp(changes.fps, 10, 60, session.settings.fps);
-    session.settings.quality = clamp(changes.quality, 30, 80, session.settings.quality);
+    session.settings.fps = clamp(changes.fps, 8, 30, session.settings.fps);
+    session.settings.quality = clamp(changes.quality, 20, 60, session.settings.quality);
   }
   async stopStream(sessionId) {
     const session = this.sessions.get(sessionId); if (!session) return;

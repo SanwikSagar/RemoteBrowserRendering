@@ -3,7 +3,9 @@ class RemoteBrowserClient {
     this.ws = null; this.sessionId = null; this.isStreaming = false;
     this.frameCount = 0; this.fpsCounter = 0; this.lastFpsUpdate = performance.now();
     this.reconnectAttempts = 0; this.maxReconnectAttempts = Infinity; this.connectionRetryTimeout = null;
-    this.latestFrame = null; this.renderScheduled = false; this.currentObjectUrl = null; this.startTimeout = null;
+    this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.currentObjectUrl = null; this.startTimeout = null;
+    this.pendingScroll = 0; this.scrollScheduled = false;
+    this.streamVersion = 0;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions'].map((id) => [id, document.getElementById(id)]));
     this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
@@ -40,8 +42,8 @@ class RemoteBrowserClient {
   savePreferences() {
     localStorage.setItem('remote-browser-preferences', JSON.stringify({ fps: this.fps(), quality: this.quality(), url: this.elements.urlInput.value }));
   }
-  fps() { return this.clampInput(this.elements.fpsInput, 10, 60, 30); }
-  quality() { return this.clampInput(this.elements.qualityInput, 30, 80, 50); }
+  fps() { return this.clampInput(this.elements.fpsInput, 8, 30, 20); }
+  quality() { return this.clampInput(this.elements.qualityInput, 20, 60, 38); }
   clampInput(input, min, max, fallback) {
     const value = Number.parseInt(input.value, 10); input.value = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; return Number(input.value);
   }
@@ -115,7 +117,17 @@ class RemoteBrowserClient {
     if (!this.isStreaming) return; event.preventDefault(); const rect = this.elements.stream.getBoundingClientRect();
     this.sendInteraction({ type: 'click', x: Math.round((event.clientX - rect.left) * this.viewportWidth / rect.width), y: Math.round((event.clientY - rect.top) * this.viewportHeight / rect.height), button: 'left' });
   }
-  handleScroll(event) { if (!this.isStreaming) return; event.preventDefault(); this.sendInteraction({ type: 'scroll', deltaY: Math.round(event.deltaY) }); }
+  handleScroll(event) {
+    if (!this.isStreaming) return; event.preventDefault();
+    this.pendingScroll += event.deltaY;
+    if (!this.scrollScheduled) {
+      this.scrollScheduled = true;
+      requestAnimationFrame(() => {
+        this.sendInteraction({ type: 'scroll', deltaY: Math.round(this.pendingScroll) });
+        this.pendingScroll = 0; this.scrollScheduled = false;
+      });
+    }
+  }
   handleKeyboard(event) {
     if (event.target === this.elements.urlInput || !this.isStreaming) return;
     if ((event.ctrlKey || event.metaKey) && ['c','v','a','x'].includes(event.key.toLowerCase())) { event.preventDefault(); this.sendInteraction({ type: 'key', key: `${event.ctrlKey ? 'Control' : 'Meta'}+${event.key.toUpperCase()}` }); return; }
@@ -152,6 +164,7 @@ class RemoteBrowserClient {
   startStream() {
     if (this.ws?.readyState !== WebSocket.OPEN) return this.showConnectionOverlay('Connecting...', 'The server connection is being restored');
     let url; try { url = this.normalizeUrl(this.elements.urlInput.value || 'https://www.google.com'); } catch (error) { return this.showNotification(error.message, 'error'); }
+    this.streamVersion++; this.latestFrame = null; this.decodeInFlight = false;
     this.elements.urlInput.value = url; this.savePreferences(); this.frameCount = this.fpsCounter = 0; this.showLoadingSpinner('Starting browser...', 'Loading page');
     this.ws.send(JSON.stringify({ type: 'start', url, fps: this.fps(), quality: this.quality(), width: this.viewportWidth, height: this.viewportHeight, isMobile: this.isMobile }));
     clearTimeout(this.startTimeout); this.startTimeout = setTimeout(() => { if (!this.isStreaming) this.showNotification('The stream is taking longer than expected. Please try again.', 'error'); }, 45_000);
@@ -168,22 +181,30 @@ class RemoteBrowserClient {
   receiveFrame(buffer) {
     if (buffer.byteLength < 18 || new DataView(buffer).getUint8(0) !== 1) return;
     const view = new DataView(buffer); this.latestFrame = { timestamp: view.getFloat64(5), image: new Blob([buffer.slice(17)], { type: 'image/webp' }) };
-    if (!this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
+    if (!this.decodeInFlight && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
   }
   renderLatestFrame() {
-    this.renderScheduled = false; const frame = this.latestFrame; this.latestFrame = null; if (!frame) return;
+    this.renderScheduled = false; if (this.decodeInFlight) return;
+    const frame = this.latestFrame; this.latestFrame = null; if (!frame) return;
+    const version = this.streamVersion;
+    this.decodeInFlight = true;
     const url = URL.createObjectURL(frame.image), image = this.elements.stream;
-    image.onload = () => { const previous = this.currentObjectUrl; this.currentObjectUrl = url; if (previous) URL.revokeObjectURL(previous); this.recordFrame(frame.timestamp); };
-    image.onerror = () => URL.revokeObjectURL(url); image.src = url;
-    if (this.latestFrame && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
+    image.onload = () => {
+      if (version !== this.streamVersion) { URL.revokeObjectURL(url); return; }
+      const previous = this.currentObjectUrl; this.currentObjectUrl = url; if (previous) URL.revokeObjectURL(previous);
+      this.decodeInFlight = false; this.recordFrame(frame.timestamp); this.scheduleLatestFrame();
+    };
+    image.onerror = () => { URL.revokeObjectURL(url); if (version === this.streamVersion) { this.decodeInFlight = false; this.scheduleLatestFrame(); } };
+    image.src = url;
   }
+  scheduleLatestFrame() { if (this.latestFrame && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); } }
   recordFrame(timestamp) {
     this.frameCount++; this.fpsCounter++; this.elements.frameCount.textContent = `${this.frameCount} frames`; const now = performance.now(), elapsed = now - this.lastFpsUpdate;
     if (elapsed >= 1000) { this.elements.fpsDisplay.textContent = `${Math.round(this.fpsCounter * 1000 / elapsed)} FPS`; this.fpsCounter = 0; this.lastFpsUpdate = now; }
     this.elements.latency.textContent = `${Math.max(0, Math.round(Date.now() - timestamp))}ms`; this.elements.stream.classList.add('active'); this.hideLoadingSpinner();
   }
   resetStream() {
-    clearTimeout(this.startTimeout); this.sessionId = null; this.isStreaming = false; this.latestFrame = null; this.enableNavigation(false); this.elements.stream.classList.remove('active');
+    clearTimeout(this.startTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
     if (this.currentObjectUrl) URL.revokeObjectURL(this.currentObjectUrl); this.currentObjectUrl = null; this.elements.stream.removeAttribute('src'); this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
     this.elements.startStreamOption.style.display = 'flex'; this.elements.stopStreamOption.style.display = 'none'; this.updateStatus('connected', 'Connected');
   }
