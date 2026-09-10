@@ -8,6 +8,8 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
+const DEBUG = process.env.DEBUG_STREAM === '1';
+const log = (message, details = '') => console.log(`[RBR] ${message}${details ? ` ${details}` : ''}`);
 app.use((req, res, next) => {
   // data: is permitted only as a non-network connection target because shader
   // loaders commonly use data:text/plain URLs. Scripts remain same-origin.
@@ -32,11 +34,12 @@ await browserPool.initialize();
 
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
-const server = app.listen(PORT, () => console.log(`Remote Browser Rendering listening on ${PORT}`));
+const server = app.listen(PORT, () => log(`listening on ${PORT}`, `debug=${DEBUG}`));
 const wss = new WebSocketServer({ server, maxPayload: 16 * 1024, perMessageDeflate: false });
 const streamManager = new StreamManager(browserPool);
 
 wss.on('connection', (ws) => {
+  log('websocket connected');
   let sessionId = null, starting = false, messages = 0;
   const resetRate = setInterval(() => { messages = 0; }, 1000);
   ws.on('message', async (message, isBinary) => {
@@ -45,6 +48,7 @@ wss.on('connection', (ws) => {
     try { data = JSON.parse(message.toString()); }
     catch { return ws.send(JSON.stringify({ type: 'error', message: 'Invalid message.' })); }
     try {
+      if (DEBUG) log('command', `${data.type}${data.sessionId ? ` session=${data.sessionId.slice(0, 8)}` : ''}`);
       if (data.type === 'start') {
         if (starting) return;
         starting = true;
@@ -56,14 +60,20 @@ wss.on('connection', (ws) => {
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'stopped' }));
       } else if (data.type === 'update' && data.sessionId === sessionId) {
         streamManager.updateStream(sessionId, data);
+      } else if (data.type === 'tab' && data.sessionId === sessionId) {
+        if (data.action === 'create') await streamManager.createTab(sessionId, data.url);
+        else if (data.action === 'switch') await streamManager.switchTab(sessionId, data.tabId);
+        else if (data.action === 'close') await streamManager.closeTab(sessionId, data.tabId);
+        else throw new Error('Unsupported tab action.');
       } else if (data.type === 'interact' && data.sessionId === sessionId) {
         await streamManager.handleInteraction(sessionId, data.action);
       } else throw new Error('Invalid session or command.');
     } catch (error) {
+      log('command error', error.message || 'unknown error');
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'error', message: error.message || 'Request failed.' }));
     } finally { starting = false; }
   });
-  ws.on('close', async () => { clearInterval(resetRate); if (sessionId) await streamManager.stopStream(sessionId); });
+  ws.on('close', async () => { clearInterval(resetRate); log('websocket closed', sessionId ? `session=${sessionId.slice(0, 8)}` : 'no session'); if (sessionId) await streamManager.stopStream(sessionId); });
 });
 
 const shutdown = async () => { await streamManager.cleanup(); await browserPool.cleanup(); server.close(); };

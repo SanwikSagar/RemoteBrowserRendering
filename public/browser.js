@@ -1,15 +1,21 @@
 class RemoteBrowserClient {
   constructor() {
+    this.debug = new URLSearchParams(location.search).has('debug') || localStorage.getItem('remote-browser-debug') === '1';
     this.ws = null; this.sessionId = null; this.isStreaming = false;
     this.frameCount = 0; this.fpsCounter = 0; this.lastFpsUpdate = performance.now();
     this.reconnectAttempts = 0; this.maxReconnectAttempts = Infinity; this.connectionRetryTimeout = null;
     this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.currentObjectUrl = null; this.startTimeout = null; this.firstFrameTimeout = null;
     this.pendingScroll = 0; this.scrollScheduled = false; this.touchState = null; this.suppressClickUntil = 0;
     this.streamVersion = 0;
+    this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
-    this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn'].map((id) => [id, document.getElementById(id)]));
     this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
     this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
+  }
+
+  log(message, details = '') {
+    if (this.debug || /error|failed|lost/i.test(message)) console.info(`[RBR] ${message}`, details);
   }
 
   detectMobile() {
@@ -77,6 +83,9 @@ class RemoteBrowserClient {
     e.settingsMenu.addEventListener('click', (event) => event.stopPropagation());
     e.startStreamOption.addEventListener('click', () => { this.startStream(); this.hideSettings(); });
     e.stopStreamOption.addEventListener('click', () => { this.stopStream(); this.hideSettings(); });
+    e.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
+    e.fullscreenExitBtn.addEventListener('click', () => this.toggleFullscreen());
+    e.newTabBtn.addEventListener('click', () => this.createTab());
     [e.fpsInput, e.qualityInput].forEach((input) => input.addEventListener('change', () => { this.fps(); this.quality(); this.savePreferences(); this.updateSettings(); }));
     document.addEventListener('pointerdown', (event) => { if (!e.settingsBtn.contains(event.target) && !e.settingsMenu.contains(event.target)) this.hideSettings(); if (!e.urlInput.closest('.url-bar').contains(event.target)) this.hideSuggestions(); });
     e.stream.addEventListener('click', (event) => { if (Date.now() >= this.suppressClickUntil) this.handleClick(event); });
@@ -87,6 +96,7 @@ class RemoteBrowserClient {
     e.stream.addEventListener('pointercancel', () => { this.touchState = null; });
     e.stream.addEventListener('contextmenu', (event) => event.preventDefault());
     document.addEventListener('keydown', (event) => this.handleKeyboard(event));
+    document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) this.elements.browserWindow.classList.remove('focus-mode'); });
   }
   toggleSettings() {
     if (this.elements.settingsMenu.classList.contains('active')) return this.hideSettings();
@@ -97,6 +107,36 @@ class RemoteBrowserClient {
     menu.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - height - 8))}px`;
   }
   hideSettings() { this.elements.settingsMenu.classList.remove('active'); }
+  async toggleFullscreen() {
+    const root = this.elements.browserWindow;
+    try {
+      if (document.fullscreenElement) { await document.exitFullscreen?.(); root.classList.remove('focus-mode'); }
+      else if (root.classList.contains('focus-mode')) root.classList.remove('focus-mode');
+      else { root.classList.add('focus-mode'); await root.requestFullscreen?.(); }
+    } catch { /* Focus mode still gives the user the full content area. */ }
+    setTimeout(() => { this.updateViewportSize(); }, 0);
+  }
+  createTab() {
+    if (!this.isStreaming) return this.startStream();
+    this.sendTabCommand('create', { url: 'https://www.google.com' });
+  }
+  sendTabCommand(action, extra = {}) {
+    if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'tab', sessionId: this.sessionId, action, ...extra }));
+  }
+  renderTabs() {
+    const bar = this.elements.tabsBar, plus = this.elements.newTabBtn;
+    bar.querySelectorAll('.tab').forEach((node) => node.remove());
+    this.tabs.forEach((tab) => {
+      const item = document.createElement('button'); item.type = 'button'; item.className = `tab ${tab.id === this.activeTabId ? 'active' : ''}`; item.title = tab.title || tab.url;
+      const icon = document.createElement('span'); icon.className = 'tab-favicon'; icon.textContent = '◉';
+      const title = document.createElement('span'); title.className = 'tab-title'; title.textContent = tab.title || 'New Tab';
+      const close = document.createElement('span'); close.className = 'tab-close'; close.textContent = '×'; close.title = 'Close tab';
+      close.addEventListener('click', (event) => { event.stopPropagation(); this.sendTabCommand('close', { tabId: tab.id }); });
+      item.addEventListener('click', () => { if (tab.id !== this.activeTabId) this.sendTabCommand('switch', { tabId: tab.id }); });
+      item.append(icon, title, close); bar.insertBefore(item, plus);
+    });
+    plus.disabled = this.tabs.length >= 3;
+  }
   updateSuggestions(query) {
     const suggestions = this.elements.suggestions, cleanQuery = query.trim();
     if (!cleanQuery) return this.hideSuggestions();
@@ -144,6 +184,7 @@ class RemoteBrowserClient {
   handlePointerDown(event) {
     if (!this.isStreaming || event.pointerType !== 'touch') return;
     event.preventDefault(); this.elements.stream.setPointerCapture?.(event.pointerId);
+    this.log('touch start', `${event.clientX},${event.clientY}`);
     this.touchState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, lastY: event.clientY, moved: false };
   }
   handlePointerMove(event) {
@@ -157,6 +198,7 @@ class RemoteBrowserClient {
     const touch = this.touchState;
     if (!touch || touch.pointerId !== event.pointerId) return;
     event.preventDefault(); this.touchState = null; this.suppressClickUntil = Date.now() + 500;
+    this.log('touch end', touch.moved ? 'scroll gesture' : 'tap');
     if (!touch.moved) this.handleClick(event);
   }
   handleKeyboard(event) {
@@ -181,11 +223,12 @@ class RemoteBrowserClient {
   }
   connect() {
     clearTimeout(this.connectionRetryTimeout); const scheme = window.location.protocol === 'https:' || window.location.hostname !== 'localhost' ? 'wss:' : 'ws:';
-    this.ws = new WebSocket(`${scheme}//${window.location.host}`); this.ws.binaryType = 'arraybuffer';
-    this.ws.onopen = () => { this.reconnectAttempts = 0; this.updateStatus('connected', 'Connected'); this.hideConnectionOverlay(); };
+    const wsUrl = `${scheme}//${window.location.host}`; this.log('connecting', wsUrl);
+    this.ws = new WebSocket(wsUrl); this.ws.binaryType = 'arraybuffer';
+    this.ws.onopen = () => { this.log('websocket connected'); this.reconnectAttempts = 0; this.updateStatus('connected', 'Connected'); this.hideConnectionOverlay(); };
     this.ws.onmessage = (event) => { if (event.data instanceof ArrayBuffer) this.receiveFrame(event.data); else { try { this.handleMessage(JSON.parse(event.data)); } catch { /* ignore malformed response */ } } };
-    this.ws.onclose = () => { this.updateStatus('disconnected', 'Disconnected'); if (this.isStreaming) { this.isStreaming = false; this.sessionId = null; } this.retryConnection(); };
-    this.ws.onerror = () => {};
+    this.ws.onclose = (event) => { this.log('websocket closed', `${event.code} ${event.reason || ''}`); this.updateStatus('disconnected', 'Disconnected'); if (this.isStreaming) { this.isStreaming = false; this.sessionId = null; } this.retryConnection(); };
+    this.ws.onerror = (error) => this.log('websocket error', error);
   }
   retryConnection() {
     const delay = Math.min(20_000, 500 * (2 ** Math.min(this.reconnectAttempts++, 6))) + Math.floor(Math.random() * 250);
@@ -197,6 +240,7 @@ class RemoteBrowserClient {
     let url; try { url = this.normalizeUrl(this.elements.urlInput.value || 'https://www.google.com'); } catch (error) { return this.showNotification(error.message, 'error'); }
     this.streamVersion++; this.latestFrame = null; this.decodeInFlight = false;
     this.elements.urlInput.value = url; this.savePreferences(); this.frameCount = this.fpsCounter = 0; this.showLoadingSpinner('Starting browser...', 'Loading page');
+    this.log('starting stream', `${url} ${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`);
     this.ws.send(JSON.stringify({ type: 'start', url, fps: this.fps(), quality: this.quality(), width: this.viewportWidth, height: this.viewportHeight, isMobile: this.isMobile }));
     clearTimeout(this.startTimeout); this.startTimeout = setTimeout(() => { if (!this.isStreaming) this.showNotification('The stream is taking longer than expected. Please try again.', 'error'); }, 45_000);
   }
@@ -204,12 +248,14 @@ class RemoteBrowserClient {
   sendInteraction(action) { if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'interact', sessionId: this.sessionId, action })); }
   handleMessage(data) {
     if (data.type === 'started') {
+      this.log('stream started', data.sessionId);
       this.sessionId = data.sessionId; this.isStreaming = true; clearTimeout(this.startTimeout); this.enableNavigation(true); this.elements.startStreamOption.style.display = 'none'; this.elements.stopStreamOption.style.display = 'flex'; this.updateStatus('streaming', 'Streaming');
       clearTimeout(this.firstFrameTimeout);
       this.firstFrameTimeout = setTimeout(() => { if (this.isStreaming && this.frameCount === 0) this.showNotification('The server is connected but has not produced a frame. Retrying capture…', 'warning'); }, 12_000);
     }
     if (data.type === 'progress') { this.updateProgressBar(data.progress); if (data.message) this.elements.loadingText.textContent = data.message; if (data.subtext) this.elements.loadingSubtext.textContent = data.subtext; }
     if (data.type === 'pageInfo' && data.url) { this.elements.currentUrl.textContent = this.truncateUrl(data.url); this.elements.currentUrl.title = data.url; this.elements.urlInput.value = data.url; this.elements.windowTitle.textContent = data.title || 'Zar Browser'; }
+    if (data.type === 'tabState') { this.tabs = Array.isArray(data.tabs) ? data.tabs : []; this.activeTabId = data.activeTabId; this.log('tabs updated', `${this.tabs.length} tabs`); this.renderTabs(); }
     if (data.type === 'stopped') this.resetStream();
     if (data.type === 'error') { this.hideLoadingSpinner(); this.showNotification(data.message || 'Request failed.', 'error'); }
   }
@@ -239,10 +285,11 @@ class RemoteBrowserClient {
   recordFrame(timestamp) {
     clearTimeout(this.firstFrameTimeout); this.frameCount++; this.fpsCounter++; this.elements.frameCount.textContent = `${this.frameCount} frames`; const now = performance.now(), elapsed = now - this.lastFpsUpdate;
     if (elapsed >= 1000) { this.elements.fpsDisplay.textContent = `${Math.round(this.fpsCounter * 1000 / elapsed)} FPS`; this.fpsCounter = 0; this.lastFpsUpdate = now; }
-    this.elements.latency.textContent = `${Math.max(0, Math.round(Date.now() - timestamp))}ms`; this.elements.stream.classList.add('active'); this.hideLoadingSpinner();
+    const latency = Math.max(0, Math.round(Date.now() - timestamp)); this.elements.latency.textContent = `${latency}ms`; this.elements.stream.classList.add('active'); this.hideLoadingSpinner();
+    if (this.debug && this.frameCount % 24 === 0) this.log('frame stats', `fps=${this.elements.fpsDisplay.textContent} latency=${latency}ms bytes=${this.currentObjectUrl ? 'decoded' : 'pending'}`);
   }
   resetStream() {
-    clearTimeout(this.startTimeout); clearTimeout(this.firstFrameTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
+    clearTimeout(this.startTimeout); clearTimeout(this.firstFrameTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.tabs = []; this.activeTabId = null; this.renderTabs(); this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
     if (this.currentObjectUrl) URL.revokeObjectURL(this.currentObjectUrl); this.currentObjectUrl = null; this.elements.stream.removeAttribute('src'); this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
     this.elements.startStreamOption.style.display = 'flex'; this.elements.stopStreamOption.style.display = 'none'; this.updateStatus('connected', 'Connected');
   }

@@ -43,6 +43,28 @@
             border-bottom: 1px solid #3c4043;
         }
 
+        .fullscreen-btn {
+            position: absolute;
+            left: 10px;
+            width: 28px;
+            height: 28px;
+            border: 0;
+            border-radius: 6px;
+            color: #cbd5e1;
+            background: transparent;
+            display: grid;
+            place-items: center;
+        }
+
+        .fullscreen-btn:hover { background: #3c4043; }
+        .fullscreen-btn svg { width: 17px; height: 17px; }
+        .focus-exit-btn { display: none; position: fixed; top: 10px; left: 10px; z-index: 10002; }
+        .browser-window.focus-mode .focus-exit-btn { display: grid; background: rgba(32, 33, 36, .72); }
+        .browser-window.focus-mode .window-controls,
+        .browser-window.focus-mode .tabs-bar,
+        .browser-window.focus-mode .nav-bar,
+        .browser-window.focus-mode .status-bar { display: none; }
+
         .window-title {
             color: #9aa0a6;
             font-size: 13px;
@@ -112,6 +134,8 @@
             background: rgba(0, 0, 0, 0.1);
             opacity: 1;
         }
+
+        .tab-close:focus-visible, .fullscreen-btn:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 2px; }
 
         .new-tab-btn {
             width: 32px;
@@ -825,14 +849,20 @@
     </style>
 </head>
 <body>
-    <div class="browser-window">
+    <div class="browser-window" id="browserWindow">
         <!-- Window Controls -->
         <div class="window-controls">
+            <button class="fullscreen-btn" id="fullscreenBtn" title="Fullscreen content" aria-label="Fullscreen content">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
+            </button>
             <span class="window-title" id="windowTitle">Zar Browser</span>
         </div>
+        <button class="fullscreen-btn focus-exit-btn" id="fullscreenExitBtn" title="Exit fullscreen" aria-label="Exit fullscreen">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 9H5V5m10 4h4V5m0 14v-4h-4M5 19v-4h4"/></svg>
+        </button>
 
         <!-- Tabs Bar -->
-        <div class="tabs-bar">
+        <div class="tabs-bar" id="tabsBar">
             <div class="tab active">
                 <svg class="tab-favicon" viewBox="0 0 16 16" fill="currentColor">
                     <path d="M8 0C3.58 0 0 3.58 0 8s3.58 8 8 8 8-3.58 8-8-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"/>
@@ -840,7 +870,7 @@
                 <span class="tab-title">New Tab</span>
                 <span class="tab-close">×</span>
             </div>
-            <button class="new-tab-btn" title="New Tab">+</button>
+            <button class="new-tab-btn" id="newTabBtn" title="New Tab" aria-label="New tab">+</button>
         </div>
 
         <!-- Navigation Bar -->
