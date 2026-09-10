@@ -1,4 +1,7 @@
 services:
+  # Native Node runtime: video streaming works, but audio capture needs
+  # ffmpeg + pulseaudio, which aren't available here. Use a Docker-based
+  # Render service (see Dockerfile) if audio is required.
   - type: web
     name: remote-browser-backend
     runtime: node

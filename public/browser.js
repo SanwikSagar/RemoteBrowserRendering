@@ -13,11 +13,11 @@ class RemoteBrowserClient {
     this.streamVersion = 0;
     // Aggressive performance optimization
     this.droppedFrames = 0; this.lastFrameTime = 0; this.targetFrameTime = 1000 / 30; // 30 FPS target
-    // Audio streaming
-    this.audioContext = null; this.audioEnabled = false;
+    // Audio streaming: an MSE-backed <audio> element fed by Opus/WebM chunks
+    this.audioEnabled = false; this.mediaSource = null; this.sourceBuffer = null; this.audioQueue = [];
     this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
-    this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn','audioEnabled','audioPlayer'].map((id) => [id, document.getElementById(id)]));
     this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
     this.log('client initialized', `viewport=${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`); this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
   }
@@ -96,6 +96,7 @@ class RemoteBrowserClient {
     e.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
     e.fullscreenExitBtn.addEventListener('click', () => this.toggleFullscreen());
     e.newTabBtn.addEventListener('click', () => this.createTab());
+    e.audioEnabled.addEventListener('change', () => this.toggleAudio(e.audioEnabled.checked));
     [e.fpsInput, e.qualityInput].forEach((input) => input.addEventListener('change', () => { this.fps(); this.quality(); this.savePreferences(); this.updateSettings(); }));
     document.addEventListener('pointerdown', (event) => { if (!e.settingsBtn.contains(event.target) && !e.settingsMenu.contains(event.target)) this.hideSettings(); if (!e.urlInput.closest('.url-bar').contains(event.target)) this.hideSuggestions(); });
     e.stream.addEventListener('click', (event) => { if (Date.now() >= this.suppressClickUntil) this.handleClick(event); });
@@ -238,7 +239,7 @@ class RemoteBrowserClient {
     const wsUrl = `${scheme}//${window.location.host}`; this.log('connecting', wsUrl);
     this.ws = new WebSocket(wsUrl); this.ws.binaryType = 'arraybuffer';
     this.ws.onopen = () => { this.log('websocket connected'); this.reconnectAttempts = 0; this.updateStatus('connected', 'Connected'); this.hideConnectionOverlay(); };
-    this.ws.onmessage = (event) => { if (event.data instanceof ArrayBuffer) this.receiveFrame(event.data); else { try { this.handleMessage(JSON.parse(event.data)); } catch { /* ignore malformed response */ } } };
+    this.ws.onmessage = (event) => { if (event.data instanceof ArrayBuffer) this.receiveBinary(event.data); else { try { this.handleMessage(JSON.parse(event.data)); } catch { /* ignore malformed response */ } } };
     this.ws.onclose = (event) => { this.log('websocket closed', `${event.code} ${event.reason || ''}`); this.updateStatus('disconnected', 'Disconnected'); if (this.isStreaming) { this.isStreaming = false; this.sessionId = null; } this.retryConnection(); };
     this.ws.onerror = (error) => this.log('websocket error', error);
   }
@@ -253,7 +254,7 @@ class RemoteBrowserClient {
     this.streamVersion++; this.latestFrame = null;
     this.elements.urlInput.value = url; this.savePreferences(); this.frameCount = this.fpsCounter = 0; this.showLoadingSpinner('Starting browser...', 'Loading page');
     this.log('starting stream', `${url} ${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`);
-    this.ws.send(JSON.stringify({ type: 'start', url, fps: this.fps(), quality: this.quality(), width: this.viewportWidth, height: this.viewportHeight, isMobile: this.isMobile }));
+    this.ws.send(JSON.stringify({ type: 'start', url, fps: this.fps(), quality: this.quality(), width: this.viewportWidth, height: this.viewportHeight, isMobile: this.isMobile, enableAudio: this.elements.audioEnabled.checked }));
     clearTimeout(this.startTimeout); this.startTimeout = setTimeout(() => { if (!this.isStreaming) this.showNotification('The stream is taking longer than expected. Please try again.', 'error'); }, 45_000);
   }
   stopStream() { if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'stop', sessionId: this.sessionId })); else this.resetStream(); }
@@ -269,9 +270,54 @@ class RemoteBrowserClient {
     if (data.type === 'pageInfo' && data.url) { this.elements.currentUrl.textContent = this.truncateUrl(data.url); this.elements.currentUrl.title = data.url; this.elements.urlInput.value = data.url; this.elements.windowTitle.textContent = data.title || 'Zar Browser'; }
     if (data.type === 'tabState') { this.tabs = Array.isArray(data.tabs) ? data.tabs : []; this.activeTabId = data.activeTabId; this.log('tabs updated', `${this.tabs.length} tabs`); this.renderTabs(); }
     if (data.type === 'stopped') this.resetStream();
+    if (data.type === 'audioInit') this.setupAudio(data.mimeType);
     if (data.type === 'error') { this.hideLoadingSpinner(); this.showNotification(data.message || 'Request failed.', 'error'); }
   }
-  receiveFrame(buffer) {
+  receiveBinary(buffer) {
+    if (buffer.byteLength < 1) return;
+    const format = new DataView(buffer).getUint8(0);
+    if (format === 3) this.receiveAudioChunk(buffer);
+    else this.receiveFrame(buffer);
+  }
+  toggleAudio(enabled) {
+    this.audioEnabled = enabled;
+    if (!this.sessionId || this.ws?.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'audio', sessionId: this.sessionId, enabled }));
+    if (enabled) this.elements.audioPlayer.play().catch(() => {});
+    else this.teardownAudio();
+  }
+  setupAudio(mimeType) {
+    if (this.mediaSource || typeof MediaSource !== 'function' || !MediaSource.isTypeSupported(mimeType)) return;
+    this.mediaSource = new MediaSource();
+    this.elements.audioPlayer.src = URL.createObjectURL(this.mediaSource);
+    this.mediaSource.addEventListener('sourceopen', () => {
+      if (!this.mediaSource || this.mediaSource.readyState !== 'open') return;
+      this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
+      this.sourceBuffer.mode = 'sequence';
+      this.sourceBuffer.addEventListener('updateend', () => this.pumpAudioQueue());
+      this.pumpAudioQueue();
+    }, { once: true });
+    this.elements.audioPlayer.play().catch(() => {});
+  }
+  receiveAudioChunk(buffer) {
+    if (!this.audioEnabled) return;
+    this.audioQueue.push(buffer.slice(9));
+    // Bound the queue so a stalled SourceBuffer cannot pin unbounded memory.
+    if (this.audioQueue.length > 60) this.audioQueue.splice(0, this.audioQueue.length - 60);
+    this.pumpAudioQueue();
+  }
+  pumpAudioQueue() {
+    if (!this.sourceBuffer || this.sourceBuffer.updating || !this.audioQueue.length) return;
+    try { this.sourceBuffer.appendBuffer(this.audioQueue.shift()); }
+    catch (error) { if (this.debug) this.log('audio append failed', error.message); }
+  }
+  teardownAudio() {
+    this.audioQueue = []; this.sourceBuffer = null;
+    const player = this.elements.audioPlayer;
+    player.pause(); player.removeAttribute('src'); player.load();
+    if (this.mediaSource) { try { URL.revokeObjectURL(player.src); } catch { /* already revoked */ } }
+    this.mediaSource = null;
+  }
     if (buffer.byteLength < 18) return;
     const view = new DataView(buffer), format = view.getUint8(0);
     if (format !== 1 && format !== 2) return;
@@ -388,6 +434,7 @@ class RemoteBrowserClient {
     
     // Clean up all frame references to free memory
     this.cleanupFrames();
+    this.teardownAudio();
     this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
     if (this.streamContext) this.streamContext.clearRect(0, 0, this.elements.stream.width, this.elements.stream.height);
     this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
@@ -406,10 +453,7 @@ class RemoteBrowserClient {
   // Clean up on page unload
   cleanup() {
     this.cleanupFrames();
-    if (this.audioContext) {
-      this.audioContext.close();
-      this.audioContext = null;
-    }
+    this.teardownAudio();
     if (this.ws) {
       this.ws.close();
       this.ws = null;

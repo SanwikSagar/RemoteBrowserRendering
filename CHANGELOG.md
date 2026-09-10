@@ -1,5 +1,43 @@
 # Changelog
 
+## [Unreleased] - Real Audio Support & Adaptive Streaming
+
+### Added
+- **Server-side audio capture**: Chrome renders into a virtual PulseAudio sink
+  (`virtual_speaker`, created by `docker-entrypoint.sh`); ffmpeg reads its
+  monitor source and encodes to Opus/WebM, streamed as binary `format=3`
+  WebSocket frames.
+- **Client audio playback**: MediaSource + SourceBuffer pipeline in
+  `browser.js` (`setupAudio`/`receiveAudioChunk`/`pumpAudioQueue`), gated by
+  the existing Audio toggle and a new `{ type: 'audio', enabled }` command
+  that starts/stops capture without restarting video.
+- `docker-entrypoint.sh` and Dockerfile `pulseaudio`/`ffmpeg` packages.
+
+### Changed
+- Replaced the placeholder `startAudioCapture` (CDP `Page.enable` no-op) with
+  a real ffmpeg child process per session.
+- Removed `--mute-audio` from the Chromium launch flags (required for audio
+  to reach the virtual sink at all).
+- Capture resolution now scales to a fixed pixel budget instead of a static
+  render scale, and JPEG quality adapts every 2s from measured Chrome encode
+  latency instead of being fixed.
+- Input dispatch (`click`/`scroll`/`type`) now goes through raw CDP
+  `Input.*` commands without awaiting each round trip.
+- Client renders decoded frames 1:1 into the canvas and lets CSS handle
+  upscaling, instead of resampling every frame on the CPU.
+- Rewrote `README.md` to describe the current binary protocol, audio
+  pipeline, and Render.com free-tier constraints (previous version described
+  a WebP/tile-diffing protocol that no longer exists in the code).
+
+### Fixed
+- `browser.js` crashed on load (`ReferenceError: global is not defined`) from
+  a leftover Node-only `global.gc()` call in client code.
+- `ImageDecoder` was being reused across frames; a decoder is bound to the
+  buffer it was constructed with, so frames after the first were replaying
+  stale image data.
+- The animation-suppression stylesheet injected via `evaluateOnNewDocument`
+  never attached because `document.head` doesn't exist at document-start.
+
 ## [Unreleased] - Performance & Memory Optimization Update
 
 ### Client-Side Improvements

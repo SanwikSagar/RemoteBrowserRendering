@@ -1,7 +1,7 @@
 {
   "name": "remote-browser-rendering",
-  "version": "2.0.0",
-  "description": "High-performance remote browser rendering system streaming webpages as JPEG at 60 FPS",
+  "version": "2.1.0",
+  "description": "Remote browser rendering over WebSocket: adaptive-quality JPEG video via CDP screencast plus real Opus/WebM audio capture",
   "main": "src/server.js",
   "type": "module",
   "scripts": {
@@ -16,7 +16,9 @@
     "rendering",
     "puppeteer",
     "streaming",
-    "jpeg"
+    "jpeg",
+    "webrtc-alternative",
+    "audio"
   ],
   "author": "",
   "license": "MIT",

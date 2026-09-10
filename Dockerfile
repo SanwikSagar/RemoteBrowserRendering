@@ -1,6 +1,8 @@
 FROM node:20-slim
 
-# Install Chrome dependencies
+# Install Chrome dependencies, plus PulseAudio and ffmpeg for server-side
+# tab-audio capture (Chrome renders into a virtual sink; ffmpeg encodes its
+# monitor source to Opus for the browser client).
 RUN apt-get update && apt-get install -y \
     chromium \
     ca-certificates \
@@ -19,6 +21,8 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 \
     libxrandr2 \
     xdg-utils \
+    pulseaudio \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -36,6 +40,7 @@ RUN npm install --omit=dev
 
 # Copy application files
 COPY . .
+RUN chmod +x docker-entrypoint.sh
 
 # Expose port
 EXPOSE 3000
@@ -44,5 +49,7 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
 
-# Start server
+# Start pulseaudio and the virtual sink before the server
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["npm", "start"]
+

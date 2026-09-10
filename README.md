@@ -1,164 +1,123 @@
 # Remote Browser Rendering
 
-High-performance remote browser rendering system streaming web pages as WebP images at up to 60 FPS.
+Streams a real Chromium tab to any browser over WebSocket: JPEG frames via CDP
+screencast for video, Opus/WebM for audio, and click/scroll/type/navigate
+interactions relayed back to the page.
 
 ## Features
 
-- **Binary WebP Streaming** - avoids Base64 and WebSocket compression overhead
-- **Mobile-Responsive** - Automatically detects and renders mobile/desktop sites correctly
-- **High Performance** - Up to 60 FPS with sub-10ms encoding
-- **Memory Optimized** - Automatic garbage collection and efficient resource management
-- **Auto-Reconnect** - Resilient WebSocket connection with exponential backoff
-- **Real-Time Interaction** - Click, scroll, and type in the remote browser
-- **Progress Tracking** - Live loading progress and performance metrics
+- **Binary frame protocol** — a small fixed header (format, frame number,
+  timestamp, width, height) followed by the raw JPEG payload; no Base64, no
+  per-message JSON overhead.
+- **Adaptive quality** — capture resolution is scaled to a fixed pixel budget
+  and JPEG quality is tuned every 2s from measured Chrome encode latency, so a
+  small server (e.g. Render's free 0.5 vCPU / 512MB plan) stays at target FPS
+  instead of falling behind.
+- **Real audio** — Chrome renders into a virtual PulseAudio sink; ffmpeg reads
+  its monitor source, encodes to Opus/WebM, and the client plays it back via
+  MediaSource. This is whole-browser audio (all tabs mixed), not per-tab.
+- **Multi-tab** — up to 3 tabs per session, switching restarts the screencast
+  for the newly active tab.
+- **Mobile emulation** — UA, viewport, and touch input toggle together based
+  on the client's own viewport/UA.
+- **Auto-reconnect** — exponential backoff WebSocket reconnect with jitter.
 
 ## Quick Start
 
-### Install Dependencies
 ```bash
 npm install
+npm start
 ```
 
-### Run Development Server
-```bash
-npm run dev:gc
-```
-
-### Run Production Server
-```bash
-npm run start:gc
-```
-
-The server will start on `http://localhost:3000`
-
-## Configuration
-
-### Environment Variables
-```bash
-PORT=3000                          # Server port
-NODE_OPTIONS="--expose-gc"         # Enable garbage collection
-```
-
-### Default Settings
-- **FPS**: 30 (adjustable 10-60)
-- **Quality**: 80% (adjustable 60-95%)
-- **Format**: WebP (optimized)
-- **Max Browsers**: 1 (configurable in browserPool)
+Open `http://localhost:3000`. Audio capture requires `ffmpeg` and a running
+PulseAudio daemon with a `virtual_speaker` null sink — see
+[Docker](#docker) below, or run `docker-entrypoint.sh` locally on Linux.
 
 ## Architecture
 
-### Server Components
-- **Express Server** - HTTP server and static file serving
-- **WebSocket Server** - Real-time bidirectional communication
-- **Browser Pool** - Manages Puppeteer browser instances
-- **Stream Manager** - Handles screenshot capture and WebP encoding
-
-### Client Components
-- **RemoteBrowserClient** - Main client class
-- **Frame Queue** - Buffers frames for smooth 60 FPS display
-- **Mobile Detection** - Automatic device type detection
-- **Responsive Viewport** - Dynamic sizing based on window
-
-## Performance
-
-### Metrics
-- **Frame Size**: 25-35 KB (WebP)
-- **Encoding Time**: 3-8ms
-- **Display FPS**: 30-60
-- **Latency**: Typically 50-200ms
-
-### Optimizations
-- Tile-based diffing (only sends changed regions)
-- WebP compression with effort level 0 (fastest)
-- Hardware-accelerated rendering
-- Aggressive resource blocking (ads, analytics, trackers)
-- Memory cleanup every 50 frames
-- Backpressure-aware frame skipping so slow links do not accumulate latency
-- Browser-native image decoding with a single live Blob URL
-
-## API
-
-### WebSocket Messages
-
-#### Client → Server
-```javascript
-// Start streaming
-{
-  type: 'start',
-  url: 'https://example.com',
-  fps: 30,
-  quality: 80,
-  width: 1280,
-  height: 720,
-  isMobile: false
-}
-
-// Stop streaming
-{ type: 'stop' }
-
-// Interact with page
-{
-  type: 'interact',
-  sessionId: 'uuid',
-  action: {
-    type: 'click',    // or 'scroll', 'type', 'key', 'navigate'
-    x: 100,
-    y: 200
-  }
-}
+```
+public/
+  index.html       UI shell, settings menu, canvas + hidden <audio>
+  browser.js       RemoteBrowserClient: WebSocket, frame decode/render,
+                   MediaSource audio playback, input capture
+src/
+  server.js        Express static host, WebSocket message routing,
+                   Chromium launch flags, stale-session sweep
+  browserPool.js   Puppeteer browser lifecycle (acquire/release/cleanup)
+  streamManager.js Per-session state: CDP screencast, ffmpeg audio capture,
+                   adaptive quality, tab management, input dispatch
+docker-entrypoint.sh  Starts PulseAudio + virtual sink before the server
 ```
 
-#### Server → Client
-```javascript
-// Stream started
-{ type: 'started', sessionId: 'uuid' }
+Each WebSocket connection may hold at most one active session
+(`StreamManager.sessions`). A session owns a Puppeteer `Browser`, one or more
+tabs (each with its own `Page` + CDP session), and optionally one ffmpeg
+process for audio.
 
-// Progress update
-{
-  type: 'progress',
-  progress: 50,
-  message: 'Loading page...',
-  subtext: 'Please wait'
-}
+### Video pipeline
 
-// Frame data (full frame)
-{
-  type: 'frame',
-  sessionId: 'uuid',
-  frame: 'base64-encoded-webp',
-  frameNumber: 42,
-  timestamp: 1234567890,
-  format: 'webp'
-}
+1. `Page.startScreencast` (CDP) delivers JPEG frames from the active tab.
+2. The server acks each frame — delayed when the client is behind schedule or
+   the socket is backed up, which throttles Chrome's encoder at the source
+   instead of dropping frames after paying to encode them.
+3. Every frame is framed as `[u8 format=2][u32 frameNumber][f64 timestamp][u16 width][u16 height][JPEG bytes]`
+   and sent as a single binary WebSocket message (no compression — JPEG is
+   already compressed).
+4. The client decodes via `ImageDecoder` (WebCodecs) with an `ImageBitmap`
+   fallback, and draws 1:1 into a canvas sized to the decoded frame; CSS scales
+   the canvas up, so the GPU compositor does the upscaling instead of the CPU.
 
-// Tile data (optimized - only changed regions)
-{
-  type: 'tiles',
-  sessionId: 'uuid',
-  tiles: [
-    { x: 0, y: 0, width: 64, height: 64, data: 'base64-webp' },
-    { x: 64, y: 0, width: 64, height: 64, data: 'base64-webp' }
-  ],
-  frameNumber: 43,
-  timestamp: 1234567890,
-  tileSize: 64,
-  gridSize: { x: 20, y: 12 }
-}
+A background timer re-measures Chrome's ack→delivery latency and nudges JPEG
+quality up or down every 2 seconds, within `[MIN_QUALITY, MAX_QUALITY]`.
 
-// Page info
-{
-  type: 'pageInfo',
-  sessionId: 'uuid',
-  url: 'https://example.com',
-  title: 'Page Title'
-}
+### Audio pipeline
 
-// Stream stopped
-{ type: 'stopped' }
+1. Chrome's audio output goes to a null-sink named `virtual_speaker` (created
+   by `docker-entrypoint.sh`); nothing plays out audibly, it just exists as a
+   capturable PCM stream.
+2. `ffmpeg -f pulse -i virtual_speaker.monitor ... -c:a libopus -f webm ...`
+   emits small WebM/Opus clusters on `stdout`.
+3. Each cluster is framed as `[u8 format=3][f64 timestamp][WebM bytes]` and
+   sent as a binary WebSocket message. The client keeps a `MediaSource` +
+   `SourceBuffer` and appends clusters in order, gated on `updateend`, with a
+   bounded queue so a stalled buffer can't accumulate memory.
+4. Audio starts/stops independently of video via a dedicated `{ type: 'audio',
+   enabled }` message, so it can be toggled mid-session without restarting the
+   screencast.
 
-// Error
-{ type: 'error', message: 'Error description' }
+### Input path
+
+Clicks and scrolls go straight to CDP (`Input.dispatchMouseEvent`) without
+`await`ing each call — CDP preserves send order per session, so blocking on
+the round trip only adds latency. Scroll deltas from rapid wheel/touch events
+are coalesced server-side and flushed once per tick as a single wheel event.
+
+## WebSocket protocol
+
+### Client → Server (JSON)
+```jsonc
+{ "type": "start", "url": "https://example.com", "quality": 60, "width": 1280, "height": 720, "isMobile": false, "enableAudio": false }
+{ "type": "stop", "sessionId": "…" }
+{ "type": "update", "sessionId": "…", "quality": 70 }
+{ "type": "audio", "sessionId": "…", "enabled": true }
+{ "type": "tab", "sessionId": "…", "action": "create" | "switch" | "close", "url": "…", "tabId": "…" }
+{ "type": "interact", "sessionId": "…", "action": { "type": "click" | "scroll" | "type" | "key" | "navigate", "...": "…" } }
 ```
+
+### Server → Client (JSON)
+```jsonc
+{ "type": "started", "sessionId": "…" }
+{ "type": "progress", "progress": 50, "message": "…", "subtext": "…" }
+{ "type": "pageInfo", "sessionId": "…", "tabId": "…", "url": "…", "title": "…" }
+{ "type": "tabState", "activeTabId": "…", "tabs": [{ "id": "…", "title": "…", "url": "…" }] }
+{ "type": "audioInit", "mimeType": "audio/webm; codecs=\"opus\"" }
+{ "type": "stopped" }
+{ "type": "error", "message": "…" }
+```
+
+### Server → Client (binary)
+Video: `[u8 format=2][u32 BE frameNumber][f64 BE timestamp][u16 BE width][u16 BE height][JPEG bytes]`
+Audio: `[u8 format=3][f64 BE timestamp][WebM/Opus bytes]`
 
 ## Deployment
 
@@ -167,70 +126,48 @@ NODE_OPTIONS="--expose-gc"         # Enable garbage collection
 docker build -t remote-browser .
 docker run -p 3000:3000 remote-browser
 ```
+The image installs `chromium`, `pulseaudio`, and `ffmpeg`, and
+`docker-entrypoint.sh` starts PulseAudio and the `virtual_speaker` null sink
+before `npm start` runs.
 
-### Render.com
-1. Connect your repository
-2. Set start command: `node --expose-gc src/server.js`
-3. Set environment: `NODE_OPTIONS=--expose-gc`
+### Render.com (free plan constraints)
+`MAX_BROWSERS` must stay at `1` — a second Chromium instance will OOM a 512MB
+container. Capture resolution and JPEG quality already adapt to a ~0.5 vCPU
+budget (see `PIXEL_BUDGET` / quality tuner in `streamManager.js`); raising
+those constants on a bigger instance is the main lever for higher fidelity.
+The free instance also sleeps after ~15 minutes idle, so the first connection
+after that pays a cold start including a fresh Chromium + PulseAudio launch.
 
-### Vercel
-Not recommended (requires long-running processes)
-Use Render or traditional hosting instead.
-
-## Browser Support
-
-| Browser | Support |
-|---------|---------|
-| Chrome | ✅ Full |
-| Firefox | ✅ Full |
-| Safari 14+ | ✅ Full |
-| Edge | ✅ Full |
-
-## Development
-
-### Project Structure
-```
-├── public/
-│   ├── index.html      # Client UI
-│   └── browser.js      # Client application
-├── src/
-│   ├── server.js       # Express & WebSocket server
-│   ├── browserPool.js  # Puppeteer instance manager
-│   └── streamManager.js # Screenshot & encoding
-├── package.json
-└── README.md
-```
-
-### Scripts
+### Environment variables
 ```bash
-npm start            # Production server
-npm run start:gc     # Production with GC enabled
-npm run dev          # Development server
-npm run dev:gc       # Development with GC enabled
+PORT=3000                       # HTTP/WS port
+MAX_BROWSERS=1                  # Concurrent Puppeteer browsers
+DEBUG_STREAM=1                  # Verbose screencast/audio/command logging
+FFMPEG_PATH=ffmpeg              # Override if ffmpeg isn't on PATH
+PULSE_AUDIO_SOURCE=virtual_speaker.monitor
+AUDIO_BITRATE=32k
 ```
+
+## Browser support
+
+Video requires WebCodecs (`ImageDecoder`) for the fast path, with an
+`ImageBitmap`/`<img>` fallback for older browsers. Audio requires
+`MediaSource` with WebM/Opus support — current Chrome, Edge, and Firefox;
+Safari's MSE/Opus support is inconsistent, so audio may not play there even
+though video does.
 
 ## Troubleshooting
 
-### High Memory Usage
-- Enable garbage collection with `--expose-gc`
-- Reduce `maxBrowsers` in browserPool
-- Lower FPS or quality settings
-
-### Poor Performance
-- Increase FPS setting (up to 60)
-- Increase quality (up to 95%)
-- Check network connection
-- Use wired connection for best results
-
-### Loading Spinner Stuck
-- Fixed in current version
-- Auto-hides on first frame
-- Also hides when progress reaches 100%
-
-### Mobile Sites Show Desktop Version
-- Fixed in current version
-- Automatic mobile detection
-- Proper user agent and viewport settings
+- **No audio despite enabling it**: confirm `ffmpeg` and `pulseaudio` are
+  installed and reachable (`FFMPEG_PATH`), and that `virtual_speaker` exists
+  (`pactl list sinks short`). Outside Docker, `docker-entrypoint.sh` isn't run
+  automatically — start PulseAudio and the sink yourself.
+- **High memory / OOM on a small instance**: keep `MAX_BROWSERS=1`, avoid
+  raising `PIXEL_BUDGET`, and confirm nothing else is competing for the
+  container's RAM.
+- **Frames stutter or quality keeps dropping**: check `DEBUG_STREAM=1` logs
+  for the `screencast stats` line — a high `encode=` value means Chrome itself
+  is CPU-bound, not the network.
 
 ## License
 

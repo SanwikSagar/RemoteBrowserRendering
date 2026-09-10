@@ -1,10 +1,18 @@
 import { randomUUID } from 'crypto';
+import { spawn } from 'child_process';
 
 const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 64 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 30;
 // Half a vCPU can encode roughly this many pixels per frame at the target rate.
 // Capture is scaled to fit the budget, then quality adapts around it.
 const PIXEL_BUDGET = 420_000, MIN_QUALITY = 30, MAX_QUALITY = 85, DEFAULT_QUALITY = 60, TUNE_INTERVAL_MS = 2_000;
 const DEBUG = process.env.DEBUG_STREAM === '1';
+
+// Chrome mixes every tab's output into one PulseAudio sink; ffmpeg reads that
+// sink's monitor source and re-encodes it to Opus for the WebSocket.
+const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
+const AUDIO_SOURCE = process.env.PULSE_AUDIO_SOURCE || 'virtual_speaker.monitor';
+const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '32k';
+const AUDIO_MIME_TYPE = 'audio/webm; codecs="opus"';
 
 // Matched inside the browser, so blocked requests never cost a round trip to Node.
 const BLOCKED_URLS = [
@@ -217,7 +225,7 @@ export class StreamManager {
       
       // Start audio streaming if enabled
       if (session.audioEnabled) {
-        await this.startAudioCapture(session, firstTab);
+        await this.startAudioCapture(session);
       }
       
       return sessionId;
@@ -229,21 +237,56 @@ export class StreamManager {
     }
   }
   
-  async startAudioCapture(session, tab) {
-    try {
-      // Enable audio domain in CDP
-      await tab.cdp.send('Page.enable');
-      
-      // Note: Audio capture requires additional setup and is experimental
-      // This is a placeholder for future audio streaming implementation
-      log('audio capture', `session=${session.id.slice(0, 8)} - audio streaming prepared`);
-      
-      session.stopAudio = async () => {
-        // Cleanup audio resources
-      };
-    } catch (error) {
-      log('audio capture failed', error.message);
-    }
+  async startAudioCapture(session) {
+    await session.stopAudio?.();
+    if (session.ws?.readyState !== session.ws?.OPEN) return;
+    
+    const args = [
+      '-hide_banner', '-loglevel', 'error',
+      '-f', 'pulse', '-i', AUDIO_SOURCE,
+      '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-vn',
+      // Small clusters keep latency low; each one is a self-contained MSE append.
+      '-f', 'webm', '-dash', '1', '-cluster_size_limit', '512K', '-cluster_time_limit', '250',
+      'pipe:1'
+    ];
+    const proc = spawn(FFMPEG_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    session.audioProcess = proc;
+    let initSent = false;
+    
+    proc.stdout.on('data', (chunk) => {
+      if (session.ws?.readyState !== session.ws?.OPEN) return;
+      if (!initSent) {
+        initSent = true;
+        session.ws.send(JSON.stringify({ type: 'audioInit', mimeType: AUDIO_MIME_TYPE }));
+      }
+      // Format byte 3 marks an audio chunk; the video header layout doesn't apply.
+      const packet = Buffer.allocUnsafe(9 + chunk.length);
+      packet.writeUInt8(3, 0);
+      packet.writeDoubleBE(Date.now(), 1);
+      chunk.copy(packet, 9);
+      session.ws.send(packet, { binary: true, compress: false });
+    });
+    proc.stderr.on('data', (data) => { if (DEBUG) log('ffmpeg audio', data.toString().trim()); });
+    proc.once('error', (error) => { log('audio capture failed', error.message); session.audioProcess = null; });
+    proc.once('exit', (code) => {
+      if (DEBUG) log('audio capture exited', `session=${session.id.slice(0, 8)} code=${code}`);
+      if (session.audioProcess === proc) session.audioProcess = null;
+    });
+    
+    session.stopAudio = async () => {
+      if (session.audioProcess !== proc) return;
+      session.audioProcess = null;
+      proc.stdout.removeAllListeners('data');
+      proc.kill('SIGTERM');
+    };
+    log('audio capture started', `session=${session.id.slice(0, 8)} source=${AUDIO_SOURCE}`);
+  }
+  
+  async setAudioEnabled(sessionId, enabled) {
+    const session = this.sessions.get(sessionId); if (!session) throw new Error('Unknown stream session.');
+    session.audioEnabled = enabled;
+    if (enabled) await this.startAudioCapture(session);
+    else await session.stopAudio?.();
   }
 
   updateStream(sessionId, changes = {}) {
