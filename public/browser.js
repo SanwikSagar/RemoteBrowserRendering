@@ -3,7 +3,7 @@ class RemoteBrowserClient {
     this.ws = null; this.sessionId = null; this.isStreaming = false;
     this.frameCount = 0; this.fpsCounter = 0; this.lastFpsUpdate = performance.now();
     this.reconnectAttempts = 0; this.maxReconnectAttempts = Infinity; this.connectionRetryTimeout = null;
-    this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.currentObjectUrl = null; this.startTimeout = null;
+    this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.currentObjectUrl = null; this.startTimeout = null; this.firstFrameTimeout = null;
     this.pendingScroll = 0; this.scrollScheduled = false;
     this.streamVersion = 0;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
@@ -179,7 +179,11 @@ class RemoteBrowserClient {
   stopStream() { if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'stop', sessionId: this.sessionId })); else this.resetStream(); }
   sendInteraction(action) { if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'interact', sessionId: this.sessionId, action })); }
   handleMessage(data) {
-    if (data.type === 'started') { this.sessionId = data.sessionId; this.isStreaming = true; clearTimeout(this.startTimeout); this.enableNavigation(true); this.elements.startStreamOption.style.display = 'none'; this.elements.stopStreamOption.style.display = 'flex'; this.updateStatus('streaming', 'Streaming'); }
+    if (data.type === 'started') {
+      this.sessionId = data.sessionId; this.isStreaming = true; clearTimeout(this.startTimeout); this.enableNavigation(true); this.elements.startStreamOption.style.display = 'none'; this.elements.stopStreamOption.style.display = 'flex'; this.updateStatus('streaming', 'Streaming');
+      clearTimeout(this.firstFrameTimeout);
+      this.firstFrameTimeout = setTimeout(() => { if (this.isStreaming && this.frameCount === 0) this.showNotification('The server is connected but has not produced a frame. Retrying capture…', 'warning'); }, 12_000);
+    }
     if (data.type === 'progress') { this.updateProgressBar(data.progress); if (data.message) this.elements.loadingText.textContent = data.message; if (data.subtext) this.elements.loadingSubtext.textContent = data.subtext; }
     if (data.type === 'pageInfo' && data.url) { this.elements.currentUrl.textContent = this.truncateUrl(data.url); this.elements.currentUrl.title = data.url; this.elements.urlInput.value = data.url; this.elements.windowTitle.textContent = data.title || 'Zar Browser'; }
     if (data.type === 'stopped') this.resetStream();
@@ -209,12 +213,12 @@ class RemoteBrowserClient {
   }
   scheduleLatestFrame() { if (this.latestFrame && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); } }
   recordFrame(timestamp) {
-    this.frameCount++; this.fpsCounter++; this.elements.frameCount.textContent = `${this.frameCount} frames`; const now = performance.now(), elapsed = now - this.lastFpsUpdate;
+    clearTimeout(this.firstFrameTimeout); this.frameCount++; this.fpsCounter++; this.elements.frameCount.textContent = `${this.frameCount} frames`; const now = performance.now(), elapsed = now - this.lastFpsUpdate;
     if (elapsed >= 1000) { this.elements.fpsDisplay.textContent = `${Math.round(this.fpsCounter * 1000 / elapsed)} FPS`; this.fpsCounter = 0; this.lastFpsUpdate = now; }
     this.elements.latency.textContent = `${Math.max(0, Math.round(Date.now() - timestamp))}ms`; this.elements.stream.classList.add('active'); this.hideLoadingSpinner();
   }
   resetStream() {
-    clearTimeout(this.startTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
+    clearTimeout(this.startTimeout); clearTimeout(this.firstFrameTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
     if (this.currentObjectUrl) URL.revokeObjectURL(this.currentObjectUrl); this.currentObjectUrl = null; this.elements.stream.removeAttribute('src'); this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
     this.elements.startStreamOption.style.display = 'flex'; this.elements.stopStreamOption.style.display = 'none'; this.updateStatus('connected', 'Connected');
   }

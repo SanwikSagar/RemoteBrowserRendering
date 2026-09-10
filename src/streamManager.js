@@ -73,19 +73,31 @@ export class StreamManager {
           if (ws.readyState === ws.OPEN && ws.bufferedAmount < MAX_BUFFERED_BYTES) {
             // Chrome captures directly at the smaller scale. This avoids a
             // full-size image buffer and expensive server-side resizing.
-            const capture = await cdp.send('Page.captureScreenshot', {
-              // JPEG is materially faster to encode than WebP on small shared
-              // CPUs. At this scale/quality it remains compact and decodes in
-              // every browser without a compatibility fallback.
-              format: 'jpeg', quality: settings.quality, optimizeForSpeed: true,
-              clip: { x: 0, y: 0, width: settings.width, height: settings.height, scale: settings.renderScale },
-              captureBeyondViewport: false
-            });
-            const image = Buffer.from(capture.data, 'base64');
+            let image, sourceWidth, sourceHeight;
+            try {
+              const capture = await cdp.send('Page.captureScreenshot', {
+                // JPEG is materially faster to encode than WebP on small shared
+                // CPUs. At this scale/quality it remains compact and decodes in
+                // every browser without a compatibility fallback.
+                format: 'jpeg', quality: settings.quality, optimizeForSpeed: true,
+                clip: { x: 0, y: 0, width: settings.width, height: settings.height, scale: settings.renderScale },
+                captureBeyondViewport: false
+              });
+              image = Buffer.from(capture.data, 'base64');
+              sourceWidth = Math.round(settings.width * settings.renderScale);
+              sourceHeight = Math.round(settings.height * settings.renderScale);
+              if (image.length === 0) throw new Error('Empty CDP screenshot');
+            } catch (captureError) {
+              // Some managed Chromium builds reject scaled CDP captures. The
+              // normal Puppeteer path is slower, but it keeps the stream alive.
+              console.warn(`Scaled capture unavailable for ${sessionId}: ${captureError.message}`);
+              image = await page.screenshot({ type: 'jpeg', quality: settings.quality, optimizeForSpeed: true });
+              sourceWidth = settings.width;
+              sourceHeight = settings.height;
+            }
             const header = Buffer.allocUnsafe(17);
             header.writeUInt8(2, 0); header.writeUInt32BE(frameNumber++, 1); header.writeDoubleBE(startedAt, 5);
-            header.writeUInt16BE(Math.round(settings.width * settings.renderScale), 13);
-            header.writeUInt16BE(Math.round(settings.height * settings.renderScale), 15);
+            header.writeUInt16BE(sourceWidth, 13); header.writeUInt16BE(sourceHeight, 15);
             ws.send(Buffer.concat([header, image]), { binary: true, compress: false });
           }
           consecutiveErrors = 0;
