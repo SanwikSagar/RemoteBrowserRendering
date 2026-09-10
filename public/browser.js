@@ -16,10 +16,6 @@ class RemoteBrowserClient {
     this.lastFrameTime = 0;
     this.targetFrameTime = 1000 / 60;
     
-    // Tile-based rendering optimization
-    this.tileCanvas = null;
-    this.tileContext = null;
-    
     this.isMobile = this.detectMobile();
     
     this.viewportWidth = 1280;
@@ -180,8 +176,8 @@ class RemoteBrowserClient {
 
     this.elements.qualityInput.addEventListener('input', (e) => {
       let value = parseInt(e.target.value);
-      if (value < 50) value = 50;
-      if (value > 90) value = 90;
+      if (value < 30) value = 30;
+      if (value > 70) value = 70;
       e.target.value = value;
     });
 
@@ -560,10 +556,6 @@ class RemoteBrowserClient {
         this.queueFrame(data);
         break;
 
-      case 'tiles':
-        this.handleTileUpdate(data);
-        break;
-
       case 'pageInfo':
         if (data.url) {
           this.elements.currentUrl.textContent = this.truncateUrl(data.url);
@@ -587,83 +579,9 @@ class RemoteBrowserClient {
     }
   }
 
-  handleTileUpdate(data) {
-    // Initialize canvas for tile composition on first use
-    if (!this.tileCanvas) {
-      this.tileCanvas = document.createElement('canvas');
-      this.tileCanvas.width = this.viewportWidth;
-      this.tileCanvas.height = this.viewportHeight;
-      this.tileContext = this.tileCanvas.getContext('2d', { alpha: false, desynchronized: true });
-      
-      // Initialize with black canvas
-      this.tileContext.fillStyle = '#000000';
-      this.tileContext.fillRect(0, 0, this.viewportWidth, this.viewportHeight);
-    }
-
-    // Apply tiles to offscreen canvas
-    let tilesRendered = 0;
-    const promises = data.tiles.map(tile => {
-      return new Promise((resolve) => {
-        const img = new Image();
-        img.onload = () => {
-          this.tileContext.drawImage(img, tile.x, tile.y, tile.width, tile.height);
-          tilesRendered++;
-          resolve();
-        };
-        img.onerror = () => {
-          console.warn(`Failed to load tile at ${tile.x},${tile.y}`);
-          resolve();
-        };
-        img.src = `data:image/webp;base64,${tile.data}`;
-      });
-    });
-
-    // Composite and display
-    Promise.all(promises).then(() => {
-      this.tileCanvas.toBlob((blob) => {
-        const oldSrc = this.elements.stream.src;
-        if (oldSrc && oldSrc.startsWith('blob:')) {
-          URL.revokeObjectURL(oldSrc);
-        }
-        
-        const url = URL.createObjectURL(blob);
-        this.elements.stream.src = url;
-        
-        // Update stats
-        this.frameCount++;
-        this.fpsCounter++;
-        this.elements.frameCountEl.textContent = this.frameCount;
-
-        const now = Date.now();
-        const elapsed = now - this.lastFpsUpdate;
-        if (elapsed >= 1000) {
-          const fps = Math.round((this.fpsCounter / elapsed) * 1000);
-          this.elements.fpsDisplay.textContent = `${fps} FPS`;
-          this.fpsCounter = 0;
-          this.lastFpsUpdate = now;
-        }
-
-        const latency = Date.now() - data.timestamp;
-        this.elements.latency.textContent = `${latency}ms`;
-
-        if (this.frameCount === 1) {
-          this.hideLoadingSpinner();
-          this.updateProgressBar(100);
-          setTimeout(() => {
-            this.elements.loadingBar.classList.remove('active');
-            this.elements.loadingBar.style.width = '0%';
-          }, 200);
-          this.elements.stream.classList.add('active');
-        }
-
-        console.log(`Tiles: ${tilesRendered}/${data.tiles.length} rendered (${Math.round(data.tiles.length / (data.gridSize.x * data.gridSize.y) * 100)}% updated)`);
-      }, 'image/webp', 0.95);
-    });
-  }
-
   queueFrame(data) {
-    // Memory optimization: Keep queue small (max 3 frames)
-    if (this.frameQueue.length >= 3) {
+    // Memory optimization: Keep queue small (max 2 frames)
+    if (this.frameQueue.length >= 2) {
       // Drop oldest frame to prevent memory buildup
       this.frameQueue.shift();
     }
@@ -686,29 +604,15 @@ class RemoteBrowserClient {
     this.isProcessingFrame = true;
     const data = this.frameQueue.shift();
     
-    // No need to skip frames - queue is already limited to 3
-
-    const now = performance.now();
-    const timeSinceLastFrame = now - this.lastFrameTime;
+    // Render immediately for minimal latency
+    this.renderFrame(data);
     
-    // Render immediately if enough time has passed, otherwise schedule
-    if (timeSinceLastFrame >= this.targetFrameTime) {
-      this.renderFrame(data);
-      this.lastFrameTime = now;
-      // Process next frame
-      requestAnimationFrame(() => this.processNextFrame());
-    } else {
-      // Schedule for next frame
-      const delay = this.targetFrameTime - timeSinceLastFrame;
-      setTimeout(() => {
-        this.renderFrame(data);
-        this.lastFrameTime = performance.now();
-        requestAnimationFrame(() => this.processNextFrame());
-      }, delay);
-    }
+    // Process next frame on next tick
+    requestAnimationFrame(() => this.processNextFrame());
   }
 
   renderFrame(data) {
+    // Ultra-fast base64 decode and blob creation
     const byteCharacters = atob(data.frame);
     const byteNumbers = new Uint8Array(byteCharacters.length);
     
@@ -719,14 +623,15 @@ class RemoteBrowserClient {
     const blob = new Blob([byteNumbers], { type: 'image/webp' });
     const url = URL.createObjectURL(blob);
     
+    // Clean up old blob URL
     const oldSrc = this.elements.stream.src;
     if (oldSrc && oldSrc.startsWith('blob:')) {
       URL.revokeObjectURL(oldSrc);
     }
     
     this.elements.stream.src = url;
-    byteNumbers.fill(0);
     
+    // Update stats
     this.frameCount++;
     this.fpsCounter++;
     this.elements.frameCountEl.textContent = this.frameCount;
@@ -755,7 +660,8 @@ class RemoteBrowserClient {
       this.elements.stream.classList.add('active');
     }
     
-    if (this.frameCount % 100 === 0) {
+    // Auto cleanup every 50 frames
+    if (this.frameCount % 50 === 0) {
       this.cleanupMemory();
     }
   }
@@ -794,8 +700,8 @@ class RemoteBrowserClient {
     fps = Math.max(10, Math.min(fps, 60)); // Allow up to 60 FPS
     this.elements.fpsInput.value = fps;
 
-    let quality = parseInt(this.elements.qualityInput.value) || 80;
-    quality = Math.max(60, Math.min(quality, 95));
+    let quality = parseInt(this.elements.qualityInput.value) || 45;
+    quality = Math.max(30, Math.min(quality, 70));
     this.elements.qualityInput.value = quality;
 
     console.log(`Starting stream for ${finalUrl}`);
@@ -842,18 +748,7 @@ class RemoteBrowserClient {
     this.sessionId = null;
     this.isStreaming = false;
     
-    this.frameQueue.forEach(frame => {
-      if (frame && frame.frame) {
-        frame.frame = null;
-      }
-    });
     this.frameQueue = [];
-    
-    // Clear tile canvas
-    if (this.tileCanvas) {
-      this.tileContext = null;
-      this.tileCanvas = null;
-    }
     
     this.enableNavigation(false);
     this.elements.stream.classList.remove('active');

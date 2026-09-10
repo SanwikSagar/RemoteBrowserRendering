@@ -5,14 +5,13 @@ export class StreamManager {
   constructor(browserPool) {
     this.browserPool = browserPool;
     this.sessions = new Map();
-    this.TILE_SIZE = 64; // 64x64 tiles for optimal performance
   }
 
   async startStream(url, ws, options = {}) {
     const sessionId = randomUUID();
     const fps = Math.min(options.fps || 30, 60);
     const frameInterval = 1000 / fps;
-    const quality = Math.min(Math.max(options.quality || 80, 60), 95);
+    const quality = Math.min(Math.max(options.quality || 45, 30), 70);
     const width = options.width || 1280;
     const height = options.height || 720;
     const isMobile = options.isMobile || false;
@@ -140,17 +139,9 @@ export class StreamManager {
       let frameCount = 0;
       let errorCount = 0;
       const maxErrors = 5;
-      let lastScreenshot = null;
-      let previousRaw = null; // Store previous frame for diffing
-
-      // Calculate tile grid
-      const tilesX = Math.ceil(width / this.TILE_SIZE);
-      const tilesY = Math.ceil(height / this.TILE_SIZE);
-      console.log(`Tile grid: ${tilesX}x${tilesY} (${tilesX * tilesY} tiles)`);
 
       const streamLoop = async () => {
         if (!isStreaming) {
-          lastScreenshot = null;
           return;
         }
 
@@ -159,104 +150,54 @@ export class StreamManager {
         try {
           if (page.isClosed()) {
             isStreaming = false;
-            lastScreenshot = null;
             return;
           }
 
+          // Capture screenshot as PNG (best quality source)
           const screenshot = await page.screenshot({
             type: 'png',
             encoding: 'binary',
             optimizeForSpeed: true
           });
 
-          if (lastScreenshot) {
-            lastScreenshot = null;
-          }
-
-          // Convert to raw pixels for comparison
-          const currentImage = sharp(screenshot);
-          const currentRaw = await currentImage
-            .ensureAlpha()
-            .raw()
-            .toBuffer({ resolveWithObject: true });
-
-          // Tile-based diffing optimization (after first frame)
-          if (frameCount > 0 && previousRaw) {
-            const changedTiles = await this.detectChangedTiles(
-              currentRaw.data,
-              previousRaw.data,
-              width,
-              height,
-              tilesX,
-              tilesY
-            );
-
-            // If only small portion changed, send tiles (90%+ bandwidth savings)
-            if (changedTiles.length > 0 && changedTiles.length < (tilesX * tilesY) * 0.3) {
-              console.log(`Sending ${changedTiles.length}/${tilesX * tilesY} changed tiles (${Math.round(changedTiles.length / (tilesX * tilesY) * 100)}%)`);
-              
-              const tiles = await this.compressTiles(screenshot, changedTiles, quality);
-
-              if (ws.readyState === 1) {
-                ws.send(JSON.stringify({
-                  type: 'tiles',
-                  sessionId,
-                  tiles,
-                  frameNumber: frameCount++,
-                  timestamp: startTime,
-                  tileSize: this.TILE_SIZE,
-                  gridSize: { x: tilesX, y: tilesY }
-                }));
-                errorCount = 0;
-              }
-
-              previousRaw = currentRaw;
-              lastScreenshot = screenshot;
-
-              if (frameCount % 50 === 0 && global.gc) global.gc();
-
-              const processingTime = Date.now() - startTime;
-              const nextDelay = Math.max(5, frameInterval - processingTime);
-
-              if (isStreaming) {
-                setTimeout(streamLoop, nextDelay);
-              } else {
-                lastScreenshot = null;
-                previousRaw = null;
-              }
-              return;
-            }
-          }
-
-          // Full frame (first frame or major changes > 30%)
+          // Extreme compression pipeline for ~5KB frames
+          // Strategy: Reduce resolution (75%) + aggressive WebP compression (quality 45)
+          // Result: 1280x720 → 960x540 @ Q45 ≈ 5-8 KB per frame
           const optimizedImage = await sharp(screenshot)
-            .resize(width, height, {
-              fit: 'inside',
-              withoutEnlargement: true,
-              fastShrinkOnLoad: true,
-              kernel: 'nearest'
+            // First: aggressive downscale (reduce pixel count)
+            .resize(Math.round(width * 0.75), Math.round(height * 0.75), {
+              fit: 'fill',
+              kernel: 'nearest',           // Fastest, no interpolation
+              fastShrinkOnLoad: true
             })
+            // Second: convert to WebP with extreme compression
             .webp({
-              quality,
-              effort: 0,
+              quality: 45,                  // Very aggressive quality (was 75)
+              effort: 0,                    // Fastest encoding
               lossless: false,
               nearLossless: false,
               smartSubsample: true,
-              preset: 'picture'
+              preset: 'picture',
+              alphaQuality: 0,              // Minimal alpha
+              reductionEffort: 0            // Skip additional optimization passes
             })
             .toBuffer();
 
-          previousRaw = currentRaw;
-          lastScreenshot = screenshot;
-
           if (ws.readyState === 1) {
+            const frameSize = Math.round(optimizedImage.length / 1024);
+            
+            // Log frame size every 30 frames for monitoring
+            if (frameCount % 30 === 0) {
+              console.log(`Frame ${frameCount}: ${frameSize} KB (target: 5-8 KB)`);
+            }
+            
+            // Send with minimal JSON overhead
             ws.send(JSON.stringify({
               type: 'frame',
               sessionId,
               frame: optimizedImage.toString('base64'),
               frameNumber: frameCount++,
-              timestamp: startTime,
-              format: 'webp'
+              timestamp: startTime
             }));
             
             errorCount = 0;
@@ -267,13 +208,10 @@ export class StreamManager {
           }
 
           const processingTime = Date.now() - startTime;
-          const nextDelay = Math.max(5, frameInterval - processingTime);
+          const nextDelay = Math.max(1, frameInterval - processingTime);
 
           if (isStreaming) {
             setTimeout(streamLoop, nextDelay);
-          } else {
-            lastScreenshot = null;
-            previousRaw = null;
           }
         } catch (error) {
           errorCount++;
@@ -281,19 +219,14 @@ export class StreamManager {
           if (error.message.includes('closed') || error.message.includes('Target closed')) {
             console.log('Page closed, stopping stream');
             isStreaming = false;
-            lastScreenshot = null;
-            previousRaw = null;
             return;
           }
           
           console.error(`Streaming error (${errorCount}/${maxErrors}):`, error.message);
-          console.error('Error stack:', error.stack);
           
           if (errorCount >= maxErrors) {
             console.error(`Too many errors, stopping stream ${sessionId}`);
             isStreaming = false;
-            lastScreenshot = null;
-            previousRaw = null;
             if (ws.readyState === 1) {
               ws.send(JSON.stringify({
                 type: 'error',
@@ -301,14 +234,6 @@ export class StreamManager {
               }));
             }
             return;
-          }
-          
-          // Clean up on error
-          if (lastScreenshot) {
-            lastScreenshot = null;
-          }
-          if (previousRaw) {
-            previousRaw = null;
           }
           
           if (isStreaming) {
@@ -442,87 +367,5 @@ export class StreamManager {
   async cleanup() {
     const sessionIds = Array.from(this.sessions.keys());
     await Promise.all(sessionIds.map(id => this.stopStream(id)));
-  }
-
-  async detectChangedTiles(currentData, previousData, width, height, tilesX, tilesY) {
-    const changedTiles = [];
-    const channels = 4; // RGBA
-    const threshold = 0.1; // 10% pixel difference threshold
-
-    for (let ty = 0; ty < tilesY; ty++) {
-      for (let tx = 0; tx < tilesX; tx++) {
-        const tileX = tx * this.TILE_SIZE;
-        const tileY = ty * this.TILE_SIZE;
-        const tileWidth = Math.min(this.TILE_SIZE, width - tileX);
-        const tileHeight = Math.min(this.TILE_SIZE, height - tileY);
-
-        // Fast pixel comparison using sampling
-        let diffPixels = 0;
-        const sampleRate = 4; // Check every 4th pixel for speed
-        const totalSamples = Math.ceil(tileWidth / sampleRate) * Math.ceil(tileHeight / sampleRate);
-
-        for (let y = 0; y < tileHeight; y += sampleRate) {
-          for (let x = 0; x < tileWidth; x += sampleRate) {
-            const px = tileX + x;
-            const py = tileY + y;
-            const offset = (py * width + px) * channels;
-
-            // Compare RGB values (skip alpha)
-            const rDiff = Math.abs(currentData[offset] - previousData[offset]);
-            const gDiff = Math.abs(currentData[offset + 1] - previousData[offset + 1]);
-            const bDiff = Math.abs(currentData[offset + 2] - previousData[offset + 2]);
-
-            if (rDiff > 10 || gDiff > 10 || bDiff > 10) {
-              diffPixels++;
-            }
-          }
-        }
-
-        // If more than threshold% pixels changed, mark tile as changed
-        if (diffPixels / totalSamples > threshold) {
-          changedTiles.push({ x: tileX, y: tileY, width: tileWidth, height: tileHeight });
-        }
-      }
-    }
-
-    return changedTiles;
-  }
-
-  async compressTiles(screenshot, tiles, quality) {
-    const compressedTiles = await Promise.all(
-      tiles.map(async (tile) => {
-        try {
-          const tileImage = await sharp(screenshot)
-            .extract({
-              left: tile.x,
-              top: tile.y,
-              width: tile.width,
-              height: tile.height
-            })
-            .webp({
-              quality,
-              effort: 0,
-              lossless: false,
-              smartSubsample: true,
-              preset: 'picture'
-            })
-            .toBuffer();
-
-          return {
-            x: tile.x,
-            y: tile.y,
-            width: tile.width,
-            height: tile.height,
-            data: tileImage.toString('base64')
-          };
-        } catch (error) {
-          console.error(`Failed to compress tile at ${tile.x},${tile.y}:`, error.message);
-          return null;
-        }
-      })
-    );
-
-    // Filter out failed tiles
-    return compressedTiles.filter(tile => tile !== null);
   }
 }
