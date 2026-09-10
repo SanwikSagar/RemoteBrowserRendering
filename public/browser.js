@@ -27,9 +27,10 @@ class RemoteBrowserClient {
       this.viewportHeight = Math.round(availableHeight);
       return;
     }
-    const ratio = 16 / 9; let width = Math.min(availableWidth, 1920), height = width / ratio;
-    if (height > availableHeight) { height = availableHeight; width = height * ratio; }
-    this.viewportWidth = Math.round(Math.max(320, width)); this.viewportHeight = Math.round(Math.max(240, height));
+    // Match the actual drawable area. A fixed 16:9 remote surface caused large
+    // empty bars on ultrawide and mobile browser windows.
+    this.viewportWidth = Math.round(Math.max(320, Math.min(availableWidth, 1920)));
+    this.viewportHeight = Math.round(Math.max(240, Math.min(availableHeight, 1080)));
   }
   restorePreferences() {
     try {
@@ -120,13 +121,8 @@ class RemoteBrowserClient {
   showConnectionOverlay(title, subtitle) { this.elements.connectionTitle.textContent = title; this.elements.connectionSubtitle.textContent = subtitle; this.elements.connectionOverlay.classList.add('active'); }
   hideConnectionOverlay() { this.elements.connectionOverlay.classList.remove('active'); }
   handleClick(event) {
-    if (!this.isStreaming) return; event.preventDefault();
-    const rect = this.elements.stream.getBoundingClientRect(), aspect = this.viewportWidth / this.viewportHeight;
-    const renderedWidth = Math.min(rect.width, rect.height * aspect), renderedHeight = renderedWidth / aspect;
-    const offsetX = (rect.width - renderedWidth) / 2, offsetY = (rect.height - renderedHeight) / 2;
-    const x = event.clientX - rect.left - offsetX, y = event.clientY - rect.top - offsetY;
-    if (x < 0 || y < 0 || x > renderedWidth || y > renderedHeight) return;
-    this.sendInteraction({ type: 'click', x: Math.round(x * this.viewportWidth / renderedWidth), y: Math.round(y * this.viewportHeight / renderedHeight), button: 'left' });
+    if (!this.isStreaming) return; event.preventDefault(); const rect = this.elements.stream.getBoundingClientRect();
+    this.sendInteraction({ type: 'click', x: Math.round((event.clientX - rect.left) * this.viewportWidth / rect.width), y: Math.round((event.clientY - rect.top) * this.viewportHeight / rect.height), button: 'left' });
   }
   handleScroll(event) {
     if (!this.isStreaming) return; event.preventDefault();
