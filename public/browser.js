@@ -16,6 +16,10 @@ class RemoteBrowserClient {
     this.lastFrameTime = 0;
     this.targetFrameTime = 1000 / 60;
     
+    // Tile-based rendering optimization
+    this.tileCanvas = null;
+    this.tileContext = null;
+    
     this.isMobile = this.detectMobile();
     
     this.viewportWidth = 1280;
@@ -556,11 +560,15 @@ class RemoteBrowserClient {
         this.queueFrame(data);
         break;
 
+      case 'tiles':
+        this.handleTileUpdate(data);
+        break;
+
       case 'pageInfo':
         if (data.url) {
           this.elements.currentUrl.textContent = this.truncateUrl(data.url);
           this.elements.urlInput.value = data.url;
-          this.elements.windowTitle.textContent = data.title || 'Remote Browser';
+          this.elements.windowTitle.textContent = data.title || 'Zar Browser';
         }
         break;
 
@@ -577,6 +585,80 @@ class RemoteBrowserClient {
         this.showNotification(`Error: ${data.message}`, 'error');
         break;
     }
+  }
+
+  handleTileUpdate(data) {
+    // Initialize canvas for tile composition on first use
+    if (!this.tileCanvas) {
+      this.tileCanvas = document.createElement('canvas');
+      this.tileCanvas.width = this.viewportWidth;
+      this.tileCanvas.height = this.viewportHeight;
+      this.tileContext = this.tileCanvas.getContext('2d', { alpha: false, desynchronized: true });
+      
+      // Initialize with black canvas
+      this.tileContext.fillStyle = '#000000';
+      this.tileContext.fillRect(0, 0, this.viewportWidth, this.viewportHeight);
+    }
+
+    // Apply tiles to offscreen canvas
+    let tilesRendered = 0;
+    const promises = data.tiles.map(tile => {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          this.tileContext.drawImage(img, tile.x, tile.y, tile.width, tile.height);
+          tilesRendered++;
+          resolve();
+        };
+        img.onerror = () => {
+          console.warn(`Failed to load tile at ${tile.x},${tile.y}`);
+          resolve();
+        };
+        img.src = `data:image/webp;base64,${tile.data}`;
+      });
+    });
+
+    // Composite and display
+    Promise.all(promises).then(() => {
+      this.tileCanvas.toBlob((blob) => {
+        const oldSrc = this.elements.stream.src;
+        if (oldSrc && oldSrc.startsWith('blob:')) {
+          URL.revokeObjectURL(oldSrc);
+        }
+        
+        const url = URL.createObjectURL(blob);
+        this.elements.stream.src = url;
+        
+        // Update stats
+        this.frameCount++;
+        this.fpsCounter++;
+        this.elements.frameCountEl.textContent = this.frameCount;
+
+        const now = Date.now();
+        const elapsed = now - this.lastFpsUpdate;
+        if (elapsed >= 1000) {
+          const fps = Math.round((this.fpsCounter / elapsed) * 1000);
+          this.elements.fpsDisplay.textContent = `${fps} FPS`;
+          this.fpsCounter = 0;
+          this.lastFpsUpdate = now;
+        }
+
+        const latency = Date.now() - data.timestamp;
+        this.elements.latency.textContent = `${latency}ms`;
+
+        if (this.frameCount === 1) {
+          this.hideLoadingSpinner();
+          this.updateProgressBar(100);
+          setTimeout(() => {
+            this.elements.loadingBar.classList.remove('active');
+            this.elements.loadingBar.style.width = '0%';
+          }, 200);
+          this.elements.stream.classList.add('active');
+        }
+
+        console.log(`Tiles: ${tilesRendered}/${data.tiles.length} rendered (${Math.round(data.tiles.length / (data.gridSize.x * data.gridSize.y) * 100)}% updated)`);
+      }, 'image/webp', 0.95);
+    });
   }
 
   queueFrame(data) {
@@ -767,6 +849,12 @@ class RemoteBrowserClient {
     });
     this.frameQueue = [];
     
+    // Clear tile canvas
+    if (this.tileCanvas) {
+      this.tileContext = null;
+      this.tileCanvas = null;
+    }
+    
     this.enableNavigation(false);
     this.elements.stream.classList.remove('active');
     
@@ -780,7 +868,7 @@ class RemoteBrowserClient {
     this.updateStatus('connected', 'Connected');
     this.elements.fpsDisplay.textContent = '0 FPS';
     this.elements.currentUrl.textContent = '-';
-    this.elements.windowTitle.textContent = 'Remote Browser';
+    this.elements.windowTitle.textContent = 'Zar Browser';
     this.frameCount = 0;
     this.elements.startStreamOption.style.display = 'flex';
     this.elements.stopStreamOption.style.display = 'none';

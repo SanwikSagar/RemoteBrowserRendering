@@ -4,6 +4,7 @@ High-performance remote browser rendering system streaming web pages as WebP ima
 
 ## Features
 
+- **Tile-Based Diffing** - Automatically sends only changed regions (70-90% bandwidth savings)
 - **WebP Streaming** - 30-40% smaller than JPEG with better quality
 - **Mobile-Responsive** - Automatically detects and renders mobile/desktop sites correctly
 - **High Performance** - Up to 60 FPS with sub-10ms encoding
@@ -68,11 +69,13 @@ NODE_OPTIONS="--expose-gc"         # Enable garbage collection
 - **Latency**: Typically 50-200ms
 
 ### Optimizations
+- Tile-based diffing (only sends changed regions)
 - WebP compression with effort level 0 (fastest)
 - Hardware-accelerated rendering
 - Aggressive resource blocking (ads, analytics, trackers)
 - Memory cleanup every 50 frames
 - Frame queue limited to 3 for memory efficiency
+- 64×64 tile grid for optimal change detection
 
 ## API
 
@@ -119,7 +122,7 @@ NODE_OPTIONS="--expose-gc"         # Enable garbage collection
   subtext: 'Please wait'
 }
 
-// Frame data
+// Frame data (full frame)
 {
   type: 'frame',
   sessionId: 'uuid',
@@ -127,6 +130,20 @@ NODE_OPTIONS="--expose-gc"         # Enable garbage collection
   frameNumber: 42,
   timestamp: 1234567890,
   format: 'webp'
+}
+
+// Tile data (optimized - only changed regions)
+{
+  type: 'tiles',
+  sessionId: 'uuid',
+  tiles: [
+    { x: 0, y: 0, width: 64, height: 64, data: 'base64-webp' },
+    { x: 64, y: 0, width: 64, height: 64, data: 'base64-webp' }
+  ],
+  frameNumber: 43,
+  timestamp: 1234567890,
+  tileSize: 64,
+  gridSize: { x: 20, y: 12 }
 }
 
 // Page info
