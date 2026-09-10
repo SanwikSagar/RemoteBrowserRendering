@@ -34,16 +34,22 @@ class RemoteBrowserClient {
   restorePreferences() {
     try {
       const preferences = JSON.parse(localStorage.getItem('remote-browser-preferences') || '{}');
-      if (preferences.fps) this.elements.fpsInput.value = preferences.fps;
-      if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
+      // Apply the new low-bandwidth defaults once; afterwards, retain choices.
+      if (localStorage.getItem('remote-browser-stream-profile') !== 'fast-jpeg-v1') {
+        this.elements.fpsInput.value = 16; this.elements.qualityInput.value = 32;
+        localStorage.setItem('remote-browser-stream-profile', 'fast-jpeg-v1');
+      } else {
+        if (preferences.fps) this.elements.fpsInput.value = preferences.fps;
+        if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
+      }
       if (preferences.url) this.elements.urlInput.value = preferences.url;
     } catch { /* Invalid local storage should never block the browser. */ }
   }
   savePreferences() {
     localStorage.setItem('remote-browser-preferences', JSON.stringify({ fps: this.fps(), quality: this.quality(), url: this.elements.urlInput.value }));
   }
-  fps() { return this.clampInput(this.elements.fpsInput, 8, 30, 20); }
-  quality() { return this.clampInput(this.elements.qualityInput, 20, 60, 38); }
+  fps() { return this.clampInput(this.elements.fpsInput, 8, 24, 16); }
+  quality() { return this.clampInput(this.elements.qualityInput, 18, 55, 32); }
   clampInput(input, min, max, fallback) {
     const value = Number.parseInt(input.value, 10); input.value = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; return Number(input.value);
   }
@@ -114,8 +120,13 @@ class RemoteBrowserClient {
   showConnectionOverlay(title, subtitle) { this.elements.connectionTitle.textContent = title; this.elements.connectionSubtitle.textContent = subtitle; this.elements.connectionOverlay.classList.add('active'); }
   hideConnectionOverlay() { this.elements.connectionOverlay.classList.remove('active'); }
   handleClick(event) {
-    if (!this.isStreaming) return; event.preventDefault(); const rect = this.elements.stream.getBoundingClientRect();
-    this.sendInteraction({ type: 'click', x: Math.round((event.clientX - rect.left) * this.viewportWidth / rect.width), y: Math.round((event.clientY - rect.top) * this.viewportHeight / rect.height), button: 'left' });
+    if (!this.isStreaming) return; event.preventDefault();
+    const rect = this.elements.stream.getBoundingClientRect(), aspect = this.viewportWidth / this.viewportHeight;
+    const renderedWidth = Math.min(rect.width, rect.height * aspect), renderedHeight = renderedWidth / aspect;
+    const offsetX = (rect.width - renderedWidth) / 2, offsetY = (rect.height - renderedHeight) / 2;
+    const x = event.clientX - rect.left - offsetX, y = event.clientY - rect.top - offsetY;
+    if (x < 0 || y < 0 || x > renderedWidth || y > renderedHeight) return;
+    this.sendInteraction({ type: 'click', x: Math.round(x * this.viewportWidth / renderedWidth), y: Math.round(y * this.viewportHeight / renderedHeight), button: 'left' });
   }
   handleScroll(event) {
     if (!this.isStreaming) return; event.preventDefault();
@@ -179,8 +190,11 @@ class RemoteBrowserClient {
     if (data.type === 'error') { this.hideLoadingSpinner(); this.showNotification(data.message || 'Request failed.', 'error'); }
   }
   receiveFrame(buffer) {
-    if (buffer.byteLength < 18 || new DataView(buffer).getUint8(0) !== 1) return;
-    const view = new DataView(buffer); this.latestFrame = { timestamp: view.getFloat64(5), image: new Blob([buffer.slice(17)], { type: 'image/webp' }) };
+    if (buffer.byteLength < 18) return;
+    const view = new DataView(buffer), format = view.getUint8(0);
+    if (format !== 1 && format !== 2) return;
+    const mimeType = format === 2 ? 'image/jpeg' : 'image/webp';
+    this.latestFrame = { timestamp: view.getFloat64(5), image: new Blob([buffer.slice(17)], { type: mimeType }) };
     if (!this.decodeInFlight && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
   }
   renderLatestFrame() {

@@ -26,9 +26,9 @@ export class StreamManager {
     const settings = {
       // A small, highly-compressed source frame is much cheaper to encode and
       // transfer; the client lets its native compositor scale it to the viewport.
-      fps: clamp(options.fps, 8, 30, 20), quality: clamp(options.quality, 20, 60, 38),
+      fps: clamp(options.fps, 8, 24, 16), quality: clamp(options.quality, 18, 55, 32),
       width: clamp(options.width, 320, MAX_WIDTH, 1280), height: clamp(options.height, 240, MAX_HEIGHT, 720),
-      isMobile: Boolean(options.isMobile), renderScale: Boolean(options.isMobile) ? 0.75 : 0.6
+      isMobile: Boolean(options.isMobile), renderScale: Boolean(options.isMobile) ? 0.65 : 0.5
     };
     const send = (message) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(message));
     let browser, page;
@@ -74,13 +74,16 @@ export class StreamManager {
             // Chrome captures directly at the smaller scale. This avoids a
             // full-size image buffer and expensive server-side resizing.
             const capture = await cdp.send('Page.captureScreenshot', {
-              format: 'webp', quality: settings.quality, optimizeForSpeed: true,
+              // JPEG is materially faster to encode than WebP on small shared
+              // CPUs. At this scale/quality it remains compact and decodes in
+              // every browser without a compatibility fallback.
+              format: 'jpeg', quality: settings.quality, optimizeForSpeed: true,
               clip: { x: 0, y: 0, width: settings.width, height: settings.height, scale: settings.renderScale },
               captureBeyondViewport: false
             });
             const image = Buffer.from(capture.data, 'base64');
             const header = Buffer.allocUnsafe(17);
-            header.writeUInt8(1, 0); header.writeUInt32BE(frameNumber++, 1); header.writeDoubleBE(startedAt, 5);
+            header.writeUInt8(2, 0); header.writeUInt32BE(frameNumber++, 1); header.writeDoubleBE(startedAt, 5);
             header.writeUInt16BE(Math.round(settings.width * settings.renderScale), 13);
             header.writeUInt16BE(Math.round(settings.height * settings.renderScale), 15);
             ws.send(Buffer.concat([header, image]), { binary: true, compress: false });
@@ -106,8 +109,8 @@ export class StreamManager {
   updateStream(sessionId, changes = {}) {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Unknown stream session.');
-    session.settings.fps = clamp(changes.fps, 8, 30, session.settings.fps);
-    session.settings.quality = clamp(changes.quality, 20, 60, session.settings.quality);
+    session.settings.fps = clamp(changes.fps, 8, 24, session.settings.fps);
+    session.settings.quality = clamp(changes.quality, 18, 55, session.settings.quality);
   }
   async stopStream(sessionId) {
     const session = this.sessions.get(sessionId); if (!session) return;
