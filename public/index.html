@@ -498,13 +498,13 @@
             /* The remote viewport is sized to this area, so filling it avoids
                letterboxing and makes touch/click coordinates exact. */
             object-fit: fill;
+            touch-action: none;
             display: none;
             background: #ffffff;
             /* Hardware-accelerated upscaling with crisp rendering */
             transform: translateZ(0);
             will-change: transform;
             image-rendering: auto;
-            image-rendering: -webkit-optimize-contrast;
             backface-visibility: hidden;
             -webkit-backface-visibility: hidden;
             /* Smooth sub-pixel rendering */
@@ -905,7 +905,7 @@
                             </svg>
                             <div class="menu-item-content">
                                 <span>FPS:</span>
-                                <input type="number" id="fpsInput" min="8" max="24" value="16" step="2">
+                                <input type="number" id="fpsInput" value="24" readonly aria-label="Fixed streaming frame rate">
                             </div>
                         </div>
                         <div class="menu-item no-hover">
@@ -914,7 +914,7 @@
                             </svg>
                             <div class="menu-item-content">
                                 <span>Quality:</span>
-                                <input type="number" id="qualityInput" min="18" max="55" value="32" step="2">
+                                <input type="number" id="qualityInput" min="35" max="60" value="46" step="2">
                             </div>
                         </div>
                 </div>

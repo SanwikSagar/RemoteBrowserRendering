@@ -4,7 +4,7 @@ class RemoteBrowserClient {
     this.frameCount = 0; this.fpsCounter = 0; this.lastFpsUpdate = performance.now();
     this.reconnectAttempts = 0; this.maxReconnectAttempts = Infinity; this.connectionRetryTimeout = null;
     this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.currentObjectUrl = null; this.startTimeout = null; this.firstFrameTimeout = null;
-    this.pendingScroll = 0; this.scrollScheduled = false;
+    this.pendingScroll = 0; this.scrollScheduled = false; this.touchState = null; this.suppressClickUntil = 0;
     this.streamVersion = 0;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions'].map((id) => [id, document.getElementById(id)]));
@@ -36,21 +36,21 @@ class RemoteBrowserClient {
     try {
       const preferences = JSON.parse(localStorage.getItem('remote-browser-preferences') || '{}');
       // Apply the new low-bandwidth defaults once; afterwards, retain choices.
-      if (localStorage.getItem('remote-browser-stream-profile') !== 'fast-jpeg-v1') {
-        this.elements.fpsInput.value = 16; this.elements.qualityInput.value = 32;
-        localStorage.setItem('remote-browser-stream-profile', 'fast-jpeg-v1');
+      if (localStorage.getItem('remote-browser-stream-profile') !== 'fixed-24fps-v1') {
+        this.elements.fpsInput.value = 24; this.elements.qualityInput.value = 46;
+        localStorage.setItem('remote-browser-stream-profile', 'fixed-24fps-v1');
       } else {
-        if (preferences.fps) this.elements.fpsInput.value = preferences.fps;
         if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
       }
+      this.elements.fpsInput.value = 24;
       if (preferences.url) this.elements.urlInput.value = preferences.url;
     } catch { /* Invalid local storage should never block the browser. */ }
   }
   savePreferences() {
     localStorage.setItem('remote-browser-preferences', JSON.stringify({ fps: this.fps(), quality: this.quality(), url: this.elements.urlInput.value }));
   }
-  fps() { return this.clampInput(this.elements.fpsInput, 8, 24, 16); }
-  quality() { return this.clampInput(this.elements.qualityInput, 18, 55, 32); }
+  fps() { this.elements.fpsInput.value = 24; return 24; }
+  quality() { return this.clampInput(this.elements.qualityInput, 35, 60, 46); }
   clampInput(input, min, max, fallback) {
     const value = Number.parseInt(input.value, 10); input.value = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; return Number(input.value);
   }
@@ -79,8 +79,12 @@ class RemoteBrowserClient {
     e.stopStreamOption.addEventListener('click', () => { this.stopStream(); this.hideSettings(); });
     [e.fpsInput, e.qualityInput].forEach((input) => input.addEventListener('change', () => { this.fps(); this.quality(); this.savePreferences(); this.updateSettings(); }));
     document.addEventListener('pointerdown', (event) => { if (!e.settingsBtn.contains(event.target) && !e.settingsMenu.contains(event.target)) this.hideSettings(); if (!e.urlInput.closest('.url-bar').contains(event.target)) this.hideSuggestions(); });
-    e.stream.addEventListener('click', (event) => this.handleClick(event));
+    e.stream.addEventListener('click', (event) => { if (Date.now() >= this.suppressClickUntil) this.handleClick(event); });
     e.stream.addEventListener('wheel', (event) => this.handleScroll(event), { passive: false });
+    e.stream.addEventListener('pointerdown', (event) => this.handlePointerDown(event), { passive: false });
+    e.stream.addEventListener('pointermove', (event) => this.handlePointerMove(event), { passive: false });
+    e.stream.addEventListener('pointerup', (event) => this.handlePointerUp(event), { passive: false });
+    e.stream.addEventListener('pointercancel', () => { this.touchState = null; });
     e.stream.addEventListener('contextmenu', (event) => event.preventDefault());
     document.addEventListener('keydown', (event) => this.handleKeyboard(event));
   }
@@ -126,14 +130,34 @@ class RemoteBrowserClient {
   }
   handleScroll(event) {
     if (!this.isStreaming) return; event.preventDefault();
-    this.pendingScroll += event.deltaY;
-    if (!this.scrollScheduled) {
-      this.scrollScheduled = true;
-      requestAnimationFrame(() => {
-        this.sendInteraction({ type: 'scroll', deltaY: Math.round(this.pendingScroll) });
-        this.pendingScroll = 0; this.scrollScheduled = false;
-      });
-    }
+    this.queueScroll(event.deltaY);
+  }
+  queueScroll(deltaY) {
+    this.pendingScroll += deltaY;
+    if (this.scrollScheduled) return;
+    this.scrollScheduled = true;
+    requestAnimationFrame(() => {
+      this.sendInteraction({ type: 'scroll', deltaY: Math.round(Math.max(-2_000, Math.min(2_000, this.pendingScroll))) });
+      this.pendingScroll = 0; this.scrollScheduled = false;
+    });
+  }
+  handlePointerDown(event) {
+    if (!this.isStreaming || event.pointerType !== 'touch') return;
+    event.preventDefault(); this.elements.stream.setPointerCapture?.(event.pointerId);
+    this.touchState = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, lastY: event.clientY, moved: false };
+  }
+  handlePointerMove(event) {
+    const touch = this.touchState;
+    if (!touch || touch.pointerId !== event.pointerId) return;
+    event.preventDefault(); const deltaY = touch.lastY - event.clientY;
+    if (Math.abs(event.clientX - touch.startX) > 8 || Math.abs(event.clientY - touch.startY) > 8) touch.moved = true;
+    touch.lastY = event.clientY; if (deltaY) this.queueScroll(deltaY);
+  }
+  handlePointerUp(event) {
+    const touch = this.touchState;
+    if (!touch || touch.pointerId !== event.pointerId) return;
+    event.preventDefault(); this.touchState = null; this.suppressClickUntil = Date.now() + 500;
+    if (!touch.moved) this.handleClick(event);
   }
   handleKeyboard(event) {
     if (event.target === this.elements.urlInput || !this.isStreaming) return;

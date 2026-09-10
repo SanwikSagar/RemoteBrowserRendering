@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 
-const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 512 * 1024, START_TIMEOUT_MS = 45_000;
+const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 512 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 24;
 const clamp = (value, min, max, fallback) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback;
@@ -24,11 +24,11 @@ export class StreamManager {
   async startStream(rawUrl, ws, options = {}) {
     const url = normalizeRemoteUrl(rawUrl), sessionId = randomUUID();
     const settings = {
-      // A small, highly-compressed source frame is much cheaper to encode and
-      // transfer; the client lets its native compositor scale it to the viewport.
-      fps: clamp(options.fps, 8, 24, 16), quality: clamp(options.quality, 18, 55, 32),
+      // Keep the capture loop at one stable 24-FPS target. Actual output can
+      // only be lower if the host cannot encode a frame inside 41.7ms.
+      fps: STREAM_FPS, quality: clamp(options.quality, 35, 60, 46),
       width: clamp(options.width, 320, MAX_WIDTH, 1280), height: clamp(options.height, 240, MAX_HEIGHT, 720),
-      isMobile: Boolean(options.isMobile), renderScale: Boolean(options.isMobile) ? 0.65 : 0.5
+      isMobile: Boolean(options.isMobile), renderScale: Boolean(options.isMobile) ? 0.8 : 0.65
     };
     const send = (message) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(message));
     let browser, page;
@@ -105,9 +105,9 @@ export class StreamManager {
           if (/closed|Target closed/i.test(error.message)) return;
           if (++consecutiveErrors >= 8) { active = false; send({ type: 'error', message: 'Stream stopped after repeated capture failures.' }); return; }
         }
-        setTimeout(streamLoop, Math.max(0, (1000 / settings.fps) - (Date.now() - startedAt)));
+        setTimeout(streamLoop, Math.max(0, (1000 / STREAM_FPS) - (Date.now() - startedAt)));
       };
-      this.sessions.set(sessionId, { browser, page, ws, settings, stop: () => { active = false; } });
+      this.sessions.set(sessionId, { browser, page, ws, settings, pendingScroll: 0, scrollScheduled: false, stop: () => { active = false; } });
       send({ type: 'progress', progress: 100, message: 'Stream ready', subtext: 'Connected' });
       streamLoop();
       return sessionId;
@@ -121,8 +121,8 @@ export class StreamManager {
   updateStream(sessionId, changes = {}) {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Unknown stream session.');
-    session.settings.fps = clamp(changes.fps, 8, 24, session.settings.fps);
-    session.settings.quality = clamp(changes.quality, 18, 55, session.settings.quality);
+    session.settings.fps = STREAM_FPS;
+    session.settings.quality = clamp(changes.quality, 35, 60, session.settings.quality);
   }
   async stopStream(sessionId) {
     const session = this.sessions.get(sessionId); if (!session) return;
@@ -134,7 +134,21 @@ export class StreamManager {
     if (!action || typeof action.type !== 'string') throw new Error('Invalid interaction.');
     switch (action.type) {
       case 'click': await page.mouse.click(clamp(action.x, 0, settings.width, 0), clamp(action.y, 0, settings.height, 0), { button: action.button === 'right' ? 'right' : 'left' }); break;
-      case 'scroll': await page.evaluate((delta) => window.scrollBy(0, delta), clamp(action.deltaY, -2000, 2000, 0)); break;
+      case 'scroll': {
+        // Swipes can produce dozens of events. Merge them server-side and apply
+        // once per tick, rather than serializing page.evaluate calls behind one
+        // another and making scrolling feel delayed.
+        session.pendingScroll += clamp(action.deltaY, -2_000, 2_000, 0);
+        if (!session.scrollScheduled) {
+          session.scrollScheduled = true;
+          setTimeout(async () => {
+            const delta = clamp(session.pendingScroll, -4_000, 4_000, 0);
+            session.pendingScroll = 0; session.scrollScheduled = false;
+            if (!page.isClosed() && delta) await page.evaluate((amount) => window.scrollBy(0, amount), delta).catch(() => {});
+          }, 0);
+        }
+        break;
+      }
       case 'type': if (typeof action.text === 'string' && action.text.length <= 512) await page.keyboard.type(action.text); break;
       case 'key': if (typeof action.key === 'string' && /^[A-Za-z0-9+_-]{1,32}$/.test(action.key)) await page.keyboard.press(action.key); break;
       case 'navigate':
