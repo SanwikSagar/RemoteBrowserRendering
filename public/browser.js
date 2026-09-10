@@ -11,11 +11,8 @@ class RemoteBrowserClient {
     this.startTimeout = null; this.firstFrameTimeout = null;
     this.pendingScroll = 0; this.scrollScheduled = false; this.touchState = null; this.suppressClickUntil = 0;
     this.streamVersion = 0;
-    // Enhanced memory management
-    this.frameQueue = []; this.maxQueueSize = 2; this.oldFrames = []; this.frameCleanupInterval = null;
     // Aggressive performance optimization
     this.droppedFrames = 0; this.lastFrameTime = 0; this.targetFrameTime = 1000 / 30; // 30 FPS target
-    this.frameDecoder = null; this.reuseDecoder = true;
     // Audio streaming
     this.audioContext = null; this.audioEnabled = false;
     this.tabs = []; this.activeTabId = null;
@@ -23,8 +20,6 @@ class RemoteBrowserClient {
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn'].map((id) => [id, document.getElementById(id)]));
     this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
     this.log('client initialized', `viewport=${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`); this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
-    // Start periodic cleanup of old frames
-    this.startFrameCleanup();
   }
 
   log(message, details = '') {
@@ -54,11 +49,12 @@ class RemoteBrowserClient {
   restorePreferences() {
     try {
       const preferences = JSON.parse(localStorage.getItem('remote-browser-preferences') || '{}');
-      // Optimized defaults for better performance
-      if (localStorage.getItem('remote-browser-stream-profile') !== 'optimized-30fps-v2') {
+      // Quality is now a ceiling the server adapts under, so the stored profile
+      // from the old fixed-quality build has to be discarded.
+      if (localStorage.getItem('remote-browser-stream-profile') !== 'adaptive-30fps-v3') {
         this.elements.fpsInput.value = 30; 
-        this.elements.qualityInput.value = 38;
-        localStorage.setItem('remote-browser-stream-profile', 'optimized-30fps-v2');
+        this.elements.qualityInput.value = 60;
+        localStorage.setItem('remote-browser-stream-profile', 'adaptive-30fps-v3');
       } else {
         if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
       }
@@ -70,7 +66,7 @@ class RemoteBrowserClient {
     localStorage.setItem('remote-browser-preferences', JSON.stringify({ fps: this.fps(), quality: this.quality(), url: this.elements.urlInput.value }));
   }
   fps() { this.elements.fpsInput.value = 30; return 30; }
-  quality() { return this.clampInput(this.elements.qualityInput, 28, 55, 38); }
+  quality() { return this.clampInput(this.elements.qualityInput, 30, 85, 60); }
   clampInput(input, min, max, fallback) {
     const value = Number.parseInt(input.value, 10); input.value = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; return Number(input.value);
   }
@@ -112,7 +108,6 @@ class RemoteBrowserClient {
     document.addEventListener('keydown', (event) => this.handleKeyboard(event));
     document.addEventListener('fullscreenchange', () => {
       if (!document.fullscreenElement) this.elements.browserWindow.classList.remove('focus-mode');
-      requestAnimationFrame(() => this.resizeRenderer());
     });
   }
   toggleSettings() {
@@ -131,7 +126,7 @@ class RemoteBrowserClient {
       else if (root.classList.contains('focus-mode')) root.classList.remove('focus-mode');
       else { root.classList.add('focus-mode'); await root.requestFullscreen?.(); }
     } catch { /* Focus mode still gives the user the full content area. */ }
-    setTimeout(() => { this.updateViewportSize(); this.resizeRenderer(); }, 0);
+    setTimeout(() => this.updateViewportSize(), 0);
   }
   createTab() {
     if (!this.isStreaming) return this.startStream();
@@ -283,19 +278,10 @@ class RemoteBrowserClient {
     const mimeType = format === 2 ? 'image/jpeg' : 'image/webp';
     
     const now = performance.now();
-    const timeSinceLastFrame = now - this.lastFrameTime;
     
-    // More lenient frame dropping - only drop if severely behind
-    if (this.decodeInFlight && timeSinceLastFrame < this.targetFrameTime * 0.3) {
-      this.droppedFrames++;
-      return;
-    }
-    
-    // Clean up old frame immediately
-    if (this.latestFrame) {
-      if (this.latestFrame.bytes) this.latestFrame.bytes = null;
-      this.latestFrame = null;
-    }
+    // The server already paces to the target frame rate, so every delivered frame
+    // is worth keeping; the newest simply supersedes an undrawn one.
+    if (this.latestFrame) { this.latestFrame.bytes = null; this.droppedFrames++; }
     
     // Store new frame
     this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer, 17), receivedAt: now };
@@ -307,50 +293,22 @@ class RemoteBrowserClient {
       requestAnimationFrame(() => this.renderLatestFrame()); 
     }
   }
-  resizeRenderer() {
-    const canvas = this.elements.stream;
-    // Optimized backing store for best performance/quality balance
-    const scale = Math.min(window.devicePixelRatio || 1, 1.25);
-    const width = Math.max(1, Math.round(canvas.clientWidth * scale));
-    const height = Math.max(1, Math.round(canvas.clientHeight * scale));
-    if (canvas.width === width && canvas.height === height && this.streamContext) return true;
-    canvas.width = width; canvas.height = height;
-    this.streamContext = canvas.getContext('2d', { 
-      alpha: false, 
-      desynchronized: true,
-      willReadFrequently: false // Important for performance
-    });
-    if (this.streamContext) {
-      this.streamContext.imageSmoothingEnabled = true;
-      this.streamContext.imageSmoothingQuality = 'medium'; // Balance quality vs performance
-    }
+  ensureContext() {
+    if (this.streamContext) return true;
+    this.streamContext = this.elements.stream.getContext('2d', { alpha: false, desynchronized: true, willReadFrequently: false });
     return Boolean(this.streamContext);
   }
   async decodeFrame(frame) {
-    // Ultra-fast WebCodecs decoder with reuse
     if (this.webCodecsAvailable) {
+      // An ImageDecoder is bound to the buffer it was constructed with, so a new
+      // one is required per frame; reusing it would replay the first frame forever.
+      let decoder = null;
       try {
-        // Reuse decoder if possible for better performance
-        if (!this.frameDecoder || this.frameDecoder.state === 'closed') {
-          this.frameDecoder = new ImageDecoder({ 
-            type: frame.mimeType, 
-            data: frame.bytes, 
-            preferAnimation: false 
-          });
-        } else if (this.frameDecoder.type !== frame.mimeType) {
-          this.frameDecoder.close();
-          this.frameDecoder = new ImageDecoder({ 
-            type: frame.mimeType, 
-            data: frame.bytes, 
-            preferAnimation: false 
-          });
-        }
-        
-        const result = await this.frameDecoder.decode({ frameIndex: 0 });
-        return { source: result.image, dispose: () => result.image.close() };
+        decoder = new ImageDecoder({ type: frame.mimeType, data: frame.bytes, preferAnimation: false });
+        const result = await decoder.decode({ frameIndex: 0 });
+        return { source: result.image, dispose: () => { result.image.close(); decoder.close(); } };
       } catch (error) {
-        if (this.frameDecoder) this.frameDecoder.close();
-        this.frameDecoder = null;
+        decoder?.close();
         this.webCodecsAvailable = false;
         this.log('WebCodecs unavailable, using ImageBitmap', error.message);
       }
@@ -359,12 +317,9 @@ class RemoteBrowserClient {
     // Fast ImageBitmap fallback
     const blob = new Blob([frame.bytes], { type: frame.mimeType });
     if (typeof createImageBitmap === 'function') {
-      const bitmap = await createImageBitmap(blob, { 
-        imageOrientation: 'none',
-        premultiplyAlpha: 'none',
-        colorSpaceConversion: 'none',
-        resizeQuality: 'pixelated'
-      });
+      // premultiplied alpha and the source color space keep the GPU upload on the
+      // fast path for an opaque canvas.
+      const bitmap = await createImageBitmap(blob, { imageOrientation: 'none', colorSpaceConversion: 'none' });
       return { source: bitmap, dispose: () => bitmap.close() };
     }
     
@@ -388,15 +343,16 @@ class RemoteBrowserClient {
     try {
       const decoded = await this.decodeFrame(frame);
       
-      if (version === this.streamVersion) {
+      if (version === this.streamVersion && this.ensureContext()) {
         this.elements.stream.classList.add('active');
-        
-        if (this.resizeRenderer()) {
-          const canvas = this.elements.stream;
-          // Ultra-fast rendering
-          this.streamContext.drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
-          this.recordFrame(frame.timestamp);
-        }
+        const canvas = this.elements.stream;
+        const source = decoded.source;
+        const width = source.displayWidth || source.width, height = source.displayHeight || source.height;
+        // Backing store matches the encoded frame so the draw is a 1:1 blit and CSS
+        // hands the upscale to the compositor instead of resampling on the CPU.
+        if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+        this.streamContext.drawImage(source, 0, 0);
+        this.recordFrame(frame.timestamp);
       }
       
       // Immediate disposal
@@ -432,7 +388,7 @@ class RemoteBrowserClient {
     
     // Clean up all frame references to free memory
     this.cleanupFrames();
-    this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
+    this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
     if (this.streamContext) this.streamContext.clearRect(0, 0, this.elements.stream.width, this.elements.stream.height);
     this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
     this.elements.startStreamOption.style.display = 'flex'; this.elements.stopStreamOption.style.display = 'none'; this.updateStatus('connected', 'Connected');
@@ -443,33 +399,13 @@ class RemoteBrowserClient {
   hideSuggestions() { this.elements.suggestions.classList.remove('active'); }
   showNotification(message, type = 'info') { const n = document.createElement('div'); n.className = `notification ${type}`; n.textContent = message; document.body.append(n); setTimeout(() => n.remove(), 5000); }
   
-  // Memory management methods
-  startFrameCleanup() {
-    // Less frequent cleanup to reduce overhead
-    this.frameCleanupInterval = setInterval(() => {
-      if (global.gc) global.gc(); // Request GC if available
-    }, 10000);
-  }
-  
   cleanupFrames() {
-    // Minimal cleanup
-    if (this.latestFrame && this.latestFrame.bytes) {
-      this.latestFrame.bytes = null;
-    }
+    if (this.latestFrame) { this.latestFrame.bytes = null; this.latestFrame = null; }
   }
   
   // Clean up on page unload
   cleanup() {
-    clearInterval(this.frameCleanupInterval);
     this.cleanupFrames();
-    if (this.latestFrame) {
-      if (this.latestFrame.bytes) this.latestFrame.bytes = null;
-      this.latestFrame = null;
-    }
-    if (this.frameDecoder) {
-      this.frameDecoder.close();
-      this.frameDecoder = null;
-    }
     if (this.audioContext) {
       this.audioContext.close();
       this.audioContext = null;

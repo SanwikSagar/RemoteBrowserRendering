@@ -1,54 +1,25 @@
 import { randomUUID } from 'crypto';
 
 const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 64 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 30;
+// Half a vCPU can encode roughly this many pixels per frame at the target rate.
+// Capture is scaled to fit the budget, then quality adapts around it.
+const PIXEL_BUDGET = 420_000, MIN_QUALITY = 30, MAX_QUALITY = 85, DEFAULT_QUALITY = 60, TUNE_INTERVAL_MS = 2_000;
 const DEBUG = process.env.DEBUG_STREAM === '1';
+
+// Matched inside the browser, so blocked requests never cost a round trip to Node.
+const BLOCKED_URLS = [
+  '*doubleclick.net*', '*google-analytics.com*', '*googlesyndication.com*', '*googletagmanager.com*',
+  '*googletagservices.com*', '*adservice.google.*', '*connect.facebook.net*', '*facebook.com/tr*',
+  '*adsystem*', '*/advertising/*', '*hotjar*', '*mixpanel*', '*segment.io*', '*sentry.io*',
+  '*.woff', '*.woff2', '*.ttf', '*.otf', '*.eot',
+  '*.mp4', '*.webm', '*.ogv', '*.mp3', '*.wav', '*.m4a', '*.mov'
+];
+
 const log = (message, details = '') => console.log(`[RBR] ${message}${details ? ` ${details}` : ''}`);
 const clamp = (value, min, max, fallback) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback;
 };
-
-// Ultra-efficient frame buffer pool with pre-allocated buffers
-class FrameBufferPool {
-  constructor(maxBuffers = 8) {
-    this.pool = [];
-    this.maxBuffers = maxBuffers;
-    this.headerPool = [];
-    this.maxHeaders = 3;
-  }
-  
-  acquireHeader() {
-    return this.headerPool.pop() || Buffer.allocUnsafe(17);
-  }
-  
-  releaseHeader(buffer) {
-    if (this.headerPool.length < this.maxHeaders) {
-      this.headerPool.push(buffer);
-    }
-  }
-  
-  acquire(size) {
-    const buffer = this.pool.find(b => b.length >= size);
-    if (buffer) {
-      this.pool = this.pool.filter(b => b !== buffer);
-      return buffer;
-    }
-    return Buffer.allocUnsafe(size);
-  }
-  
-  release(buffer) {
-    if (this.pool.length < this.maxBuffers && buffer.length <= 256 * 1024) {
-      this.pool.push(buffer);
-    }
-  }
-  
-  clear() {
-    this.pool = [];
-    this.headerPool = [];
-  }
-}
-
-const frameBufferPool = new FrameBufferPool();
 
 export function normalizeRemoteUrl(value) {
   const raw = String(value || '').trim();
@@ -66,105 +37,121 @@ export class StreamManager {
   constructor(browserPool) { this.browserPool = browserPool; this.sessions = new Map(); }
 
   async configurePage(page, settings) {
-    await page.setUserAgent(settings.isMobile
-      ? 'Mozilla/5.0 (Linux; Android 13; SM-G950F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
-      : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36');
-    await page.setViewport({ width: settings.width, height: settings.height, deviceScaleFactor: 1, isMobile: settings.isMobile, hasTouch: settings.isMobile });
+    const cdp = await page.target().createCDPSession();
+    await Promise.all([
+      page.setUserAgent(settings.isMobile
+        ? 'Mozilla/5.0 (Linux; Android 13; SM-G950F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+        : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'),
+      page.setViewport({ width: settings.width, height: settings.height, deviceScaleFactor: 1, isMobile: settings.isMobile, hasTouch: settings.isMobile }),
+      page.evaluateOnNewDocument(() => {
+        window.Notification = undefined;
+        // document.head does not exist yet at document-start, so the animation
+        // suppression has to be attached once the document element appears.
+        const style = document.createElement('style');
+        style.textContent = '*,*::before,*::after{animation-duration:0s !important;transition-duration:0s !important;scroll-behavior:auto !important}';
+        const attach = () => (document.head || document.documentElement)?.appendChild(style);
+        if (document.documentElement) attach();
+        else document.addEventListener('readystatechange', attach, { once: true });
+      })
+    ]);
     if (settings.isMobile) await page.setExtraHTTPHeaders({ 'Sec-CH-UA-Mobile': '?1', 'Sec-CH-UA-Platform': '"Android"', 'Accept-Language': 'en-US,en;q=0.9' });
-    
-    // More aggressive blocking for performance
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-      const type = request.resourceType(), requestUrl = request.url().toLowerCase();
-      // Block fonts, ads, analytics, and unnecessary media
-      const blocked = ['font', 'media', 'websocket'].includes(type) || 
-        /(?:doubleclick|google-analytics|\/analytics|\/tracking|facebook\.com\/tr|adsystem|googlesyndication|adservice|ads\.|advertising)/.test(requestUrl);
-      (blocked ? request.abort() : request.continue()).catch(() => {});
-    });
-    
-    // Performance optimizations
-    await page.evaluateOnNewDocument(() => { 
-      window.Notification = undefined;
-      // Disable animations for performance
-      const style = document.createElement('style');
-      style.textContent = '* { animation-duration: 0s !important; transition-duration: 0s !important; }';
-      document.head?.appendChild(style);
-    });
-    
-    return page.target().createCDPSession();
+
+    await cdp.send('Network.enable', { maxTotalBufferSize: 2 * 1024 * 1024, maxResourceBufferSize: 1024 * 1024 }).catch(() => {});
+    await cdp.send('Network.setBlockedURLs', { urls: BLOCKED_URLS }).catch(() => {});
+    return cdp;
   }
 
   tabSummary(tab) { return { id: tab.id, title: tab.title || 'New Tab', url: tab.url || 'about:blank' }; }
   sendTabState(session) {
-    if (session.ws.readyState === session.ws.OPEN) session.ws.send(JSON.stringify({ type: 'tabState', activeTabId: session.activeTabId, tabs: [...session.tabs.values()].map((tab) => this.tabSummary(tab)) }));
+    if (session.ws?.readyState === session.ws?.OPEN) session.ws.send(JSON.stringify({ type: 'tabState', activeTabId: session.activeTabId, tabs: [...session.tabs.values()].map((tab) => this.tabSummary(tab)) }));
   }
   async sendPageInfo(session, tab) {
     tab.url = tab.page.url(); tab.title = await tab.page.title().catch(() => '');
-    if (session.ws.readyState === session.ws.OPEN) session.ws.send(JSON.stringify({ type: 'pageInfo', sessionId: session.id, tabId: tab.id, url: tab.url, title: tab.title }));
+    if (session.ws?.readyState === session.ws?.OPEN) session.ws.send(JSON.stringify({ type: 'pageInfo', sessionId: session.id, tabId: tab.id, url: tab.url, title: tab.title }));
   }
 
   async startScreencast(session, tab) {
     await session.stopScreencast?.();
-    let lastSentAt = 0, framesSent = 0, framesDropped = 0;
+    let lastSentAt = 0, framesSent = 0, framesDropped = 0, ackTimer = null, ackAt = 0, encodeEma = 0;
+    let quality = session.settings.quality;
     const minFrameInterval = Math.floor(1000 / STREAM_FPS);
-    
-    const onFrame = ({ data, metadata, sessionId: frameId }) => {
-      // Acknowledge immediately to prevent Chrome from buffering
-      setImmediate(() => tab.cdp.send('Page.screencastFrameAck', { sessionId: frameId }).catch(() => {}));
-      
-      if (session.activeTabId !== tab.id || session.ws.readyState !== session.ws.OPEN) return;
-      
-      const now = Date.now();
-      
-      // Ultra-aggressive backpressure and frame rate control
-      if (session.ws.bufferedAmount >= MAX_BUFFERED_BYTES || now - lastSentAt < minFrameInterval) {
-        framesDropped++;
-        return;
-      }
-      
-      const image = Buffer.from(data, 'base64');
-      if (!image.length) return;
-      
-      const width = Math.min(0xffff, Math.round((metadata.deviceWidth || session.settings.width) * session.settings.renderScale));
-      const height = Math.min(0xffff, Math.round((metadata.deviceHeight || session.settings.height) * session.settings.renderScale));
-      
-      // Use pooled header buffer
-      const header = frameBufferPool.acquireHeader();
-      header.writeUInt8(2, 0); 
-      header.writeUInt32BE(session.frameNumber++, 1); 
-      header.writeDoubleBE(now, 5);
-      header.writeUInt16BE(width, 13); 
-      header.writeUInt16BE(height, 15);
-      
-      // Send frame
-      try {
-        session.ws.send(Buffer.concat([header, image]), { binary: true, compress: false });
-        lastSentAt = now;
-        framesSent++;
-      } finally {
-        frameBufferPool.releaseHeader(header);
-      }
-      
-      if (DEBUG && session.frameNumber % STREAM_FPS === 0) {
-        const dropRate = framesDropped > 0 ? Math.round((framesDropped / (framesSent + framesDropped)) * 100) : 0;
-        log('screencast stats', `session=${session.id.slice(0, 8)} fps=${Math.round(framesSent / (now - (lastSentAt - (framesSent * minFrameInterval))) * 1000)} dropped=${dropRate}% size=${Math.round(image.length / 1024)}KB buffer=${Math.round(session.ws.bufferedAmount / 1024)}KB`);
-        framesSent = 0;
-        framesDropped = 0;
-      }
-    };
-    
-    tab.cdp.on('Page.screencastFrame', onFrame);
-    
-    // Optimized screencast settings for better performance
-    await tab.cdp.send('Page.startScreencast', {
-      format: 'jpeg', 
-      quality: session.settings.quality,
+    const applyCaptureSettings = () => tab.cdp.send('Page.startScreencast', {
+      format: 'jpeg',
+      quality,
       maxWidth: Math.round(session.settings.width * session.settings.renderScale),
       maxHeight: Math.round(session.settings.height * session.settings.renderScale),
       everyNthFrame: 1
     });
     
+    const onFrame = ({ data, metadata, sessionId: frameId }) => {
+      const ack = () => { ackTimer = null; ackAt = Date.now(); tab.cdp.send('Page.screencastFrameAck', { sessionId: frameId }).catch(() => {}); };
+      
+      if (session.activeTabId !== tab.id || session.ws?.readyState !== session.ws?.OPEN) { setImmediate(ack); return; }
+      
+      const now = Date.now();
+      
+      // Time from ack to delivery is how long Chrome needed to capture and encode.
+      // It is the only signal that separates a CPU-bound instance from a page that
+      // simply has not repainted.
+      if (ackAt) encodeEma = encodeEma ? encodeEma * 0.8 + (now - ackAt) * 0.2 : now - ackAt;
+      
+      const waitMs = minFrameInterval - (now - lastSentAt);
+      
+      // Chrome only captures again once the previous frame is acknowledged, so
+      // delaying the ack throttles encoding at the source instead of paying for
+      // a JPEG that would immediately be discarded here.
+      if (waitMs > 0 || session.ws.bufferedAmount >= MAX_BUFFERED_BYTES) {
+        framesDropped++;
+        ackTimer = setTimeout(ack, Math.max(waitMs, 5));
+        return;
+      }
+      setImmediate(ack);
+      
+      const imageSize = Buffer.byteLength(data, 'base64');
+      if (!imageSize) return;
+      
+      const width = Math.min(0xffff, metadata.deviceWidth || session.settings.width);
+      const height = Math.min(0xffff, metadata.deviceHeight || session.settings.height);
+      
+      // Header and payload share one allocation; decoding straight into the tail
+      // avoids an intermediate buffer and a full copy of every frame.
+      const packet = Buffer.allocUnsafe(17 + imageSize);
+      packet.writeUInt8(2, 0);
+      packet.writeUInt32BE(session.frameNumber++, 1);
+      packet.writeDoubleBE(now, 5);
+      packet.writeUInt16BE(width, 13);
+      packet.writeUInt16BE(height, 15);
+      const written = packet.write(data, 17, 'base64');
+      if (!written) return;
+      
+      session.ws.send(written === imageSize ? packet : packet.subarray(0, 17 + written), { binary: true, compress: false });
+      lastSentAt = now;
+      framesSent++;
+    };
+    
+    tab.cdp.on('Page.screencastFrame', onFrame);
+    await applyCaptureSettings();
+    
+    // Encoding is the scarce resource on a small instance, so quality is spent
+    // only while the target frame rate is actually being met.
+    const tuneTimer = setInterval(() => {
+      const congested = (session.ws?.bufferedAmount || 0) > MAX_BUFFERED_BYTES / 2;
+      const previous = quality;
+      if (encodeEma) {
+        if (congested || encodeEma > minFrameInterval * 1.6) quality = Math.max(MIN_QUALITY, quality - 6);
+        else if (encodeEma < minFrameInterval * 0.8) quality = Math.min(session.settings.quality, quality + 3);
+      }
+      if (DEBUG) {
+        const total = framesSent + framesDropped;
+        log('screencast stats', `session=${session.id.slice(0, 8)} fps=${Math.round(framesSent / (TUNE_INTERVAL_MS / 1000))} dropped=${total ? Math.round((framesDropped / total) * 100) : 0}% encode=${Math.round(encodeEma)}ms q=${quality}`);
+      }
+      framesSent = 0; framesDropped = 0;
+      if (quality !== previous) applyCaptureSettings().catch(() => {});
+    }, TUNE_INTERVAL_MS);
+    
     session.stopScreencast = async () => {
+      clearInterval(tuneTimer);
+      clearTimeout(ackTimer);
       tab.cdp.off('Page.screencastFrame', onFrame);
       await tab.cdp.send('Page.stopScreencast').catch(() => {});
     };
@@ -176,13 +163,14 @@ export class StreamManager {
     const url = normalizeRemoteUrl(rawUrl), sessionId = randomUUID();
     log('starting stream', `session=${sessionId.slice(0, 8)} url=${url}`);
     const settings = {
-      // Increased to 30 FPS for smoother experience
-      fps: STREAM_FPS, quality: clamp(options.quality, 28, 55, 38),
+      fps: STREAM_FPS, quality: clamp(options.quality, MIN_QUALITY, MAX_QUALITY, DEFAULT_QUALITY),
       width: clamp(options.width, 320, MAX_WIDTH, 1280), height: clamp(options.height, 240, MAX_HEIGHT, 720),
-      isMobile: Boolean(options.isMobile), 
-      // Reduced render scale for better performance
-      renderScale: Boolean(options.isMobile) ? 0.7 : 0.55
+      isMobile: Boolean(options.isMobile),
+      renderScale: 1
     };
+    // Small phone viewports already fit the budget and are sent at native size;
+    // only large desktop surfaces get scaled down before encoding.
+    settings.renderScale = Math.min(1, Math.sqrt(PIXEL_BUDGET / (settings.width * settings.height)));
     const send = (message) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(message));
     let browser, page;
     try {
@@ -262,7 +250,7 @@ export class StreamManager {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Unknown stream session.');
     session.settings.fps = STREAM_FPS;
-    session.settings.quality = clamp(changes.quality, 35, 60, session.settings.quality);
+    session.settings.quality = clamp(changes.quality, MIN_QUALITY, MAX_QUALITY, session.settings.quality);
   }
   async stopStream(sessionId) {
     const session = this.sessions.get(sessionId); if (!session) return;
@@ -309,7 +297,16 @@ export class StreamManager {
     const { page } = tab, { ws, settings } = session;
     if (!action || typeof action.type !== 'string') throw new Error('Invalid interaction.');
     switch (action.type) {
-      case 'click': await page.mouse.click(clamp(action.x, 0, settings.width, 0), clamp(action.y, 0, settings.height, 0), { button: action.button === 'right' ? 'right' : 'left' }); break;
+      case 'click': {
+        const x = clamp(action.x, 0, settings.width, 0), y = clamp(action.y, 0, settings.height, 0);
+        const button = action.button === 'right' ? 'right' : 'left', buttons = button === 'right' ? 2 : 1;
+        // Not awaited: CDP preserves send order on a session, and blocking on the
+        // round trip is what makes a remote click feel detached from the tap.
+        tab.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 }).catch(() => {});
+        tab.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons, clickCount: 1 }).catch(() => {});
+        tab.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount: 1 }).catch(() => {});
+        break;
+      }
       case 'scroll': {
         // Swipes can produce dozens of events. Merge them server-side and apply
         // once per tick, rather than serializing page.evaluate calls behind one
@@ -317,16 +314,21 @@ export class StreamManager {
         session.pendingScroll += clamp(action.deltaY, -2_000, 2_000, 0);
         if (!session.scrollScheduled) {
           session.scrollScheduled = true;
-          // Immediate execution for better responsiveness
-          setImmediate(async () => {
+          setImmediate(() => {
             const delta = clamp(session.pendingScroll, -4_000, 4_000, 0);
             session.pendingScroll = 0; session.scrollScheduled = false;
-            if (!page.isClosed() && delta) await page.evaluate((amount) => window.scrollBy(0, amount), delta).catch(() => {});
+            if (!delta) return;
+            // A real wheel event also scrolls whatever nested container is under
+            // the cursor, which window.scrollBy cannot do.
+            tab.cdp.send('Input.dispatchMouseEvent', {
+              type: 'mouseWheel', x: Math.round(settings.width / 2), y: Math.round(settings.height / 2),
+              deltaX: 0, deltaY: delta, pointerType: 'mouse'
+            }).catch(() => {});
           });
         }
         break;
       }
-      case 'type': if (typeof action.text === 'string' && action.text.length <= 512) await page.keyboard.type(action.text); break;
+      case 'type': if (typeof action.text === 'string' && action.text.length <= 512) tab.cdp.send('Input.insertText', { text: action.text }).catch(() => {}); break;
       case 'key': if (typeof action.key === 'string' && /^[A-Za-z0-9+_-]{1,32}$/.test(action.key)) await page.keyboard.press(action.key); break;
       case 'navigate':
         if (action.action === 'back') await page.goBack({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});

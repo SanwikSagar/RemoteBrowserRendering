@@ -30,14 +30,21 @@ const browserPool = new BrowserPool({
     args: [
       // Security
       '--no-sandbox', '--disable-setuid-sandbox',
-      // Memory and performance optimizations
+      // /dev/shm is tiny in a container, so Chrome must not try to use it
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-software-rasterizer',
+      '--disable-accelerated-2d-canvas',
       '--disable-extensions',
       '--disable-plugins',
-      '--disable-web-security', // For testing only
-      '--disable-features=IsolateOrigins,site-per-process',
+      // One shared renderer keeps the process count, and therefore RSS, low enough
+      // to survive a 512MB container.
+      '--disable-features=IsolateOrigins,site-per-process,TranslateUI,BackForwardCache,AcceptCHFrame',
+      '--renderer-process-limit=1',
+      '--enable-low-end-device-mode',
+      '--js-flags=--max-old-space-size=192',
+      // A single raster thread avoids oversubscribing half a vCPU
+      '--num-raster-threads=1',
       // Network optimizations
       '--disable-background-networking',
       '--disable-sync',
@@ -50,6 +57,7 @@ const browserPool = new BrowserPool({
       '--disable-ipc-flooding-protection',
       '--disable-popup-blocking',
       '--disable-prompt-on-repost',
+      // Frames must keep painting even though the window is never focused
       '--disable-renderer-backgrounding',
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
@@ -62,11 +70,7 @@ const browserPool = new BrowserPool({
       '--hide-scrollbars',
       '--force-color-profile=srgb',
       '--disable-smooth-scrolling',
-      // Memory limits
-      '--max-old-space-size=512',
-      '--js-flags=--max-old-space-size=512',
-      // Performance
-      '--enable-features=NetworkService,NetworkServiceInProcess',
+      '--enable-features=NetworkServiceInProcess',
       '--disable-blink-features=AutomationControlled'
     ] 
   }
@@ -88,10 +92,9 @@ const streamManager = new StreamManager(browserPool);
 
 // Periodic cleanup of stale sessions (every 30 seconds)
 setInterval(() => {
-  const now = Date.now();
   for (const [sessionId, session] of streamManager.sessions.entries()) {
     // Clean up sessions with closed WebSocket connections
-    if (session.ws.readyState === session.ws.CLOSED || session.ws.readyState === session.ws.CLOSING) {
+    if (!session.ws || session.ws.readyState === session.ws.CLOSED || session.ws.readyState === session.ws.CLOSING) {
       log('cleaning stale session', `session=${sessionId.slice(0, 8)}`);
       streamManager.stopStream(sessionId).catch(() => {});
     }
