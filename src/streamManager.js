@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 
-const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 512 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 24;
+const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 192 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 24;
 const DEBUG = process.env.DEBUG_STREAM === '1';
 const log = (message, details = '') => console.log(`[RBR] ${message}${details ? ` ${details}` : ''}`);
 const clamp = (value, min, max, fallback) => {
@@ -84,14 +84,19 @@ export class StreamManager {
             // full-size image buffer and expensive server-side resizing.
             let image, sourceWidth, sourceHeight;
             try {
-              const capture = await activeTab.cdp.send('Page.captureScreenshot', {
+              const captureOptions = {
                 // JPEG is materially faster to encode than WebP on small shared
                 // CPUs. At this scale/quality it remains compact and decodes in
                 // every browser without a compatibility fallback.
-                format: 'jpeg', quality: settings.quality, optimizeForSpeed: true,
+                format: 'jpeg', quality: settings.quality,
                 clip: { x: 0, y: 0, width: settings.width, height: settings.height, scale: settings.renderScale },
                 captureBeyondViewport: false
-              });
+              };
+              // `optimizeForSpeed` is unavailable on older Chromium versions.
+              // Capture once without it before ever falling back to full size.
+              let capture;
+              try { capture = await activeTab.cdp.send('Page.captureScreenshot', { ...captureOptions, optimizeForSpeed: true }); }
+              catch (unsupportedOption) { capture = await activeTab.cdp.send('Page.captureScreenshot', captureOptions); }
               image = Buffer.from(capture.data, 'base64');
               sourceWidth = Math.round(settings.width * settings.renderScale);
               sourceHeight = Math.round(settings.height * settings.renderScale);

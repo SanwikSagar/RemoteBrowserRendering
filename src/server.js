@@ -19,7 +19,9 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: '16kb' }));
-app.use(express.static(path.join(__dirname, '../public'), { maxAge: '1h', etag: true }));
+// The client and server speak a versioned binary protocol. Never keep an old
+// browser.js in a visitor's cache after a deploy.
+app.use(express.static(path.join(__dirname, '../public'), { maxAge: 0, etag: true, setHeaders: (res) => res.setHeader('Cache-Control', 'no-store') }));
 
 const browserPool = new BrowserPool({
   maxBrowsers: Number(process.env.MAX_BROWSERS) || 1,

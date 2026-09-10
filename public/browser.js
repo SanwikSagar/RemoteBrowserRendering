@@ -11,11 +11,11 @@ class RemoteBrowserClient {
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn'].map((id) => [id, document.getElementById(id)]));
     this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
-    this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
+    this.log('client initialized', `viewport=${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`); this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
   }
 
   log(message, details = '') {
-    if (this.debug || /error|failed|lost/i.test(message)) console.info(`[RBR] ${message}`, details);
+    console.info(`[RBR] ${message}`, details);
   }
 
   detectMobile() {
@@ -286,7 +286,7 @@ class RemoteBrowserClient {
     clearTimeout(this.firstFrameTimeout); this.frameCount++; this.fpsCounter++; this.elements.frameCount.textContent = `${this.frameCount} frames`; const now = performance.now(), elapsed = now - this.lastFpsUpdate;
     if (elapsed >= 1000) { this.elements.fpsDisplay.textContent = `${Math.round(this.fpsCounter * 1000 / elapsed)} FPS`; this.fpsCounter = 0; this.lastFpsUpdate = now; }
     const latency = Math.max(0, Math.round(Date.now() - timestamp)); this.elements.latency.textContent = `${latency}ms`; this.elements.stream.classList.add('active'); this.hideLoadingSpinner();
-    if (this.debug && this.frameCount % 24 === 0) this.log('frame stats', `fps=${this.elements.fpsDisplay.textContent} latency=${latency}ms bytes=${this.currentObjectUrl ? 'decoded' : 'pending'}`);
+    if (this.frameCount % 24 === 0) this.log('frame stats', `fps=${this.elements.fpsDisplay.textContent} latency=${latency}ms rendered=24`);
   }
   resetStream() {
     clearTimeout(this.startTimeout); clearTimeout(this.firstFrameTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.tabs = []; this.activeTabId = null; this.renderTabs(); this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
