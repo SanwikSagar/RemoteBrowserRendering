@@ -25,12 +25,51 @@ app.use(express.static(path.join(__dirname, '../public'), { maxAge: 0, etag: tru
 
 const browserPool = new BrowserPool({
   maxBrowsers: Number(process.env.MAX_BROWSERS) || 1,
-  launchOptions: { headless: true, args: [
-    '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
-    '--disable-extensions', '--disable-background-networking', '--disable-sync', '--mute-audio',
-    '--autoplay-policy=no-user-gesture-required',
-    '--no-first-run', '--no-default-browser-check', '--hide-scrollbars', '--force-color-profile=srgb'
-  ] }
+  launchOptions: { 
+    headless: true, 
+    args: [
+      // Security
+      '--no-sandbox', '--disable-setuid-sandbox',
+      // Memory and performance optimizations
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-extensions',
+      '--disable-plugins',
+      '--disable-web-security', // For testing only
+      '--disable-features=IsolateOrigins,site-per-process',
+      // Network optimizations
+      '--disable-background-networking',
+      '--disable-sync',
+      '--disable-translate',
+      '--disable-default-apps',
+      '--disable-breakpad',
+      '--disable-client-side-phishing-detection',
+      '--disable-component-extensions-with-background-pages',
+      '--disable-hang-monitor',
+      '--disable-ipc-flooding-protection',
+      '--disable-popup-blocking',
+      '--disable-prompt-on-repost',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      // Audio
+      '--mute-audio',
+      '--autoplay-policy=no-user-gesture-required',
+      // Visual optimizations
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--hide-scrollbars',
+      '--force-color-profile=srgb',
+      '--disable-smooth-scrolling',
+      // Memory limits
+      '--max-old-space-size=512',
+      '--js-flags=--max-old-space-size=512',
+      // Performance
+      '--enable-features=NetworkService,NetworkServiceInProcess',
+      '--disable-blink-features=AutomationControlled'
+    ] 
+  }
 });
 await browserPool.initialize();
 

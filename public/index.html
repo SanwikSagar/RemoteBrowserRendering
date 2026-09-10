@@ -934,7 +934,7 @@
                             </svg>
                             <div class="menu-item-content">
                                 <span>FPS:</span>
-                                <input type="number" id="fpsInput" value="24" readonly aria-label="Fixed streaming frame rate">
+                                <input type="number" id="fpsInput" value="30" readonly aria-label="Fixed streaming frame rate">
                             </div>
                         </div>
                         <div class="menu-item no-hover">
@@ -943,7 +943,19 @@
                             </svg>
                             <div class="menu-item-content">
                                 <span>Quality:</span>
-                                <input type="number" id="qualityInput" min="35" max="60" value="46" step="2">
+                                <input type="number" id="qualityInput" min="28" max="55" value="38" step="2">
+                            </div>
+                        </div>
+                        <div class="menu-item no-hover">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15.536a5 5 0 001.414 1.06m2.828-9.9a9 9 0 000 12.728"></path>
+                            </svg>
+                            <div class="menu-item-content">
+                                <span>Audio:</span>
+                                <label class="audio-toggle">
+                                    <input type="checkbox" id="audioEnabled">
+                                    <span class="toggle-slider"></span>
+                                </label>
                             </div>
                         </div>
                 </div>

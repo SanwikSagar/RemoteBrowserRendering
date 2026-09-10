@@ -4,13 +4,20 @@ class RemoteBrowserClient {
     this.ws = null; this.sessionId = null; this.isStreaming = false;
     this.frameCount = 0; this.fpsCounter = 0; this.lastFpsUpdate = performance.now();
     this.reconnectAttempts = 0; this.maxReconnectAttempts = Infinity; this.connectionRetryTimeout = null;
-    this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.streamContext = null; this.webCodecsAvailable = typeof ImageDecoder === 'function'; this.startTimeout = null; this.firstFrameTimeout = null;
+    // Ultra-optimized frame handling
+    this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; 
+    this.streamContext = null; 
+    this.webCodecsAvailable = typeof ImageDecoder === 'function'; 
+    this.startTimeout = null; this.firstFrameTimeout = null;
     this.pendingScroll = 0; this.scrollScheduled = false; this.touchState = null; this.suppressClickUntil = 0;
     this.streamVersion = 0;
-    // Memory management - frame queue with automatic cleanup
-    this.frameQueue = []; this.maxQueueSize = 3; this.oldFrames = []; this.frameCleanupInterval = null;
-    // Performance optimization - adaptive frame dropping
-    this.droppedFrames = 0; this.lastFrameTime = 0; this.targetFrameTime = 1000 / 24;
+    // Enhanced memory management
+    this.frameQueue = []; this.maxQueueSize = 2; this.oldFrames = []; this.frameCleanupInterval = null;
+    // Aggressive performance optimization
+    this.droppedFrames = 0; this.lastFrameTime = 0; this.targetFrameTime = 1000 / 30; // 30 FPS target
+    this.frameDecoder = null; this.reuseDecoder = true;
+    // Audio streaming
+    this.audioContext = null; this.audioEnabled = false;
     this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn'].map((id) => [id, document.getElementById(id)]));
@@ -47,22 +54,23 @@ class RemoteBrowserClient {
   restorePreferences() {
     try {
       const preferences = JSON.parse(localStorage.getItem('remote-browser-preferences') || '{}');
-      // Apply the new low-bandwidth defaults once; afterwards, retain choices.
-      if (localStorage.getItem('remote-browser-stream-profile') !== 'fixed-24fps-v1') {
-        this.elements.fpsInput.value = 24; this.elements.qualityInput.value = 46;
-        localStorage.setItem('remote-browser-stream-profile', 'fixed-24fps-v1');
+      // Optimized defaults for better performance
+      if (localStorage.getItem('remote-browser-stream-profile') !== 'optimized-30fps-v2') {
+        this.elements.fpsInput.value = 30; 
+        this.elements.qualityInput.value = 38;
+        localStorage.setItem('remote-browser-stream-profile', 'optimized-30fps-v2');
       } else {
         if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
       }
-      this.elements.fpsInput.value = 24;
+      this.elements.fpsInput.value = 30; // Fixed at 30 FPS
       if (preferences.url) this.elements.urlInput.value = preferences.url;
     } catch { /* Invalid local storage should never block the browser. */ }
   }
   savePreferences() {
     localStorage.setItem('remote-browser-preferences', JSON.stringify({ fps: this.fps(), quality: this.quality(), url: this.elements.urlInput.value }));
   }
-  fps() { this.elements.fpsInput.value = 24; return 24; }
-  quality() { return this.clampInput(this.elements.qualityInput, 35, 60, 46); }
+  fps() { this.elements.fpsInput.value = 30; return 30; }
+  quality() { return this.clampInput(this.elements.qualityInput, 28, 55, 38); }
   clampInput(input, min, max, fallback) {
     const value = Number.parseInt(input.value, 10); input.value = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; return Number(input.value);
   }
@@ -277,69 +285,90 @@ class RemoteBrowserClient {
     const now = performance.now();
     const timeSinceLastFrame = now - this.lastFrameTime;
     
-    // Adaptive frame dropping - skip if we're behind schedule
-    if (this.decodeInFlight && timeSinceLastFrame < this.targetFrameTime * 0.5) {
+    // More lenient frame dropping - only drop if severely behind
+    if (this.decodeInFlight && timeSinceLastFrame < this.targetFrameTime * 0.3) {
       this.droppedFrames++;
-      if (this.debug && this.droppedFrames % 10 === 0) this.log('dropped frames', this.droppedFrames);
       return;
     }
     
-    // Clean up old frame if exists
+    // Clean up old frame immediately
     if (this.latestFrame) {
-      this.oldFrames.push(this.latestFrame);
-      if (this.oldFrames.length > 10) {
-        this.oldFrames.shift(); // Remove oldest
-      }
+      if (this.latestFrame.bytes) this.latestFrame.bytes = null;
+      this.latestFrame = null;
     }
     
-    // Keep the WebSocket payload as bytes. The fast path decodes that buffer
-    // directly, avoiding Blob URLs and the corresponding DevTools image rows.
+    // Store new frame
     this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer, 17), receivedAt: now };
     this.lastFrameTime = now;
     
-    if (!this.decodeInFlight && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
+    // Immediate scheduling for lowest latency
+    if (!this.decodeInFlight && !this.renderScheduled) { 
+      this.renderScheduled = true; 
+      requestAnimationFrame(() => this.renderLatestFrame()); 
+    }
   }
   resizeRenderer() {
     const canvas = this.elements.stream;
-    // A modest backing-store cap keeps canvas upscaling responsive on phones,
-    // while retaining enough density for text.  CSS continues to fill all of
-    // the available viewport without a layout change for each incoming frame.
-    const scale = Math.min(window.devicePixelRatio || 1, 1.5);
+    // Optimized backing store for best performance/quality balance
+    const scale = Math.min(window.devicePixelRatio || 1, 1.25);
     const width = Math.max(1, Math.round(canvas.clientWidth * scale));
     const height = Math.max(1, Math.round(canvas.clientHeight * scale));
     if (canvas.width === width && canvas.height === height && this.streamContext) return true;
     canvas.width = width; canvas.height = height;
-    this.streamContext = canvas.getContext('2d', { alpha: false, desynchronized: true });
+    this.streamContext = canvas.getContext('2d', { 
+      alpha: false, 
+      desynchronized: true,
+      willReadFrequently: false // Important for performance
+    });
     if (this.streamContext) {
       this.streamContext.imageSmoothingEnabled = true;
-      this.streamContext.imageSmoothingQuality = 'high';
+      this.streamContext.imageSmoothingQuality = 'medium'; // Balance quality vs performance
     }
     return Boolean(this.streamContext);
   }
   async decodeFrame(frame) {
-    // Chrome's WebCodecs decoder accepts the received JPEG bytes directly. It
-    // avoids both an Image element and a Blob URL, keeping the Network panel
-    // quiet and the compositor free of per-frame resource bookkeeping.
+    // Ultra-fast WebCodecs decoder with reuse
     if (this.webCodecsAvailable) {
-      let decoder;
       try {
-        decoder = new ImageDecoder({ type: frame.mimeType, data: frame.bytes, preferAnimation: false });
-        const result = await decoder.decode({ frameIndex: 0 });
-        decoder.close();
+        // Reuse decoder if possible for better performance
+        if (!this.frameDecoder || this.frameDecoder.state === 'closed') {
+          this.frameDecoder = new ImageDecoder({ 
+            type: frame.mimeType, 
+            data: frame.bytes, 
+            preferAnimation: false 
+          });
+        } else if (this.frameDecoder.type !== frame.mimeType) {
+          this.frameDecoder.close();
+          this.frameDecoder = new ImageDecoder({ 
+            type: frame.mimeType, 
+            data: frame.bytes, 
+            preferAnimation: false 
+          });
+        }
+        
+        const result = await this.frameDecoder.decode({ frameIndex: 0 });
         return { source: result.image, dispose: () => result.image.close() };
       } catch (error) {
-        decoder?.close();
+        if (this.frameDecoder) this.frameDecoder.close();
+        this.frameDecoder = null;
         this.webCodecsAvailable = false;
-        this.log('WebCodecs decode unavailable; using ImageBitmap fallback', error.message || error);
+        this.log('WebCodecs unavailable, using ImageBitmap', error.message);
       }
     }
+    
+    // Fast ImageBitmap fallback
     const blob = new Blob([frame.bytes], { type: frame.mimeType });
     if (typeof createImageBitmap === 'function') {
-      const bitmap = await createImageBitmap(blob);
+      const bitmap = await createImageBitmap(blob, { 
+        imageOrientation: 'none',
+        premultiplyAlpha: 'none',
+        colorSpaceConversion: 'none',
+        resizeQuality: 'pixelated'
+      });
       return { source: bitmap, dispose: () => bitmap.close() };
     }
-    // Older browsers keep the same canvas pipeline. This fallback never swaps
-    // the visible element or forces a relayout for each streamed frame.
+    
+    // Legacy fallback
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(blob), image = new Image();
       image.onload = () => resolve({ source: image, dispose: () => URL.revokeObjectURL(url) });
@@ -348,28 +377,40 @@ class RemoteBrowserClient {
     });
   }
   async renderLatestFrame() {
-    this.renderScheduled = false; if (this.decodeInFlight) return;
-    const frame = this.latestFrame; this.latestFrame = null; if (!frame) return;
+    this.renderScheduled = false; 
+    if (this.decodeInFlight || !this.latestFrame) return;
+    
+    const frame = this.latestFrame; 
+    this.latestFrame = null;
     const version = this.streamVersion;
+    
     this.decodeInFlight = true;
     try {
       const decoded = await this.decodeFrame(frame);
-      if (version === this.streamVersion) this.elements.stream.classList.add('active');
-      if (version === this.streamVersion && this.resizeRenderer()) {
-        const canvas = this.elements.stream;
-        // Use faster rendering with willReadFrequently hint off (default)
-        this.streamContext.drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
-        this.recordFrame(frame.timestamp);
+      
+      if (version === this.streamVersion) {
+        this.elements.stream.classList.add('active');
+        
+        if (this.resizeRenderer()) {
+          const canvas = this.elements.stream;
+          // Ultra-fast rendering
+          this.streamContext.drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
+          this.recordFrame(frame.timestamp);
+        }
       }
-      // Immediately dispose decoded frame to free memory
+      
+      // Immediate disposal
       decoded.dispose();
-      // Clear frame data reference
       if (frame.bytes) frame.bytes = null;
     } catch (error) {
-      this.log('frame decode failed', error);
+      if (this.debug) this.log('frame decode failed', error.message);
     } finally {
       this.decodeInFlight = false;
-      this.scheduleLatestFrame();
+      // Check for next frame immediately
+      if (this.latestFrame && !this.renderScheduled) {
+        this.renderScheduled = true;
+        requestAnimationFrame(() => this.renderLatestFrame());
+      }
     }
   }
   scheduleLatestFrame() { if (this.latestFrame && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); } }
@@ -404,22 +445,16 @@ class RemoteBrowserClient {
   
   // Memory management methods
   startFrameCleanup() {
-    // Periodically clean up old frames every 5 seconds
+    // Less frequent cleanup to reduce overhead
     this.frameCleanupInterval = setInterval(() => {
-      this.cleanupFrames();
-    }, 5000);
+      if (global.gc) global.gc(); // Request GC if available
+    }, 10000);
   }
   
   cleanupFrames() {
-    // Clear old frame references
-    this.oldFrames.forEach(frame => {
-      if (frame.bytes) frame.bytes = null;
-    });
-    this.oldFrames = [];
-    
-    // Force garbage collection hint (not guaranteed but helps)
-    if (this.debug && this.oldFrames.length > 0) {
-      this.log('memory cleanup', `cleared ${this.oldFrames.length} old frames`);
+    // Minimal cleanup
+    if (this.latestFrame && this.latestFrame.bytes) {
+      this.latestFrame.bytes = null;
     }
   }
   
@@ -430,6 +465,14 @@ class RemoteBrowserClient {
     if (this.latestFrame) {
       if (this.latestFrame.bytes) this.latestFrame.bytes = null;
       this.latestFrame = null;
+    }
+    if (this.frameDecoder) {
+      this.frameDecoder.close();
+      this.frameDecoder = null;
+    }
+    if (this.audioContext) {
+      this.audioContext.close();
+      this.audioContext = null;
     }
     if (this.ws) {
       this.ws.close();
