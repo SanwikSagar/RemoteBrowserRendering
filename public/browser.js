@@ -7,11 +7,17 @@ class RemoteBrowserClient {
     this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; this.streamContext = null; this.webCodecsAvailable = typeof ImageDecoder === 'function'; this.startTimeout = null; this.firstFrameTimeout = null;
     this.pendingScroll = 0; this.scrollScheduled = false; this.touchState = null; this.suppressClickUntil = 0;
     this.streamVersion = 0;
+    // Memory management - frame queue with automatic cleanup
+    this.frameQueue = []; this.maxQueueSize = 3; this.oldFrames = []; this.frameCleanupInterval = null;
+    // Performance optimization - adaptive frame dropping
+    this.droppedFrames = 0; this.lastFrameTime = 0; this.targetFrameTime = 1000 / 24;
     this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn'].map((id) => [id, document.getElementById(id)]));
     this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
     this.log('client initialized', `viewport=${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`); this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
+    // Start periodic cleanup of old frames
+    this.startFrameCleanup();
   }
 
   log(message, details = '') {
@@ -267,9 +273,30 @@ class RemoteBrowserClient {
     const view = new DataView(buffer), format = view.getUint8(0);
     if (format !== 1 && format !== 2) return;
     const mimeType = format === 2 ? 'image/jpeg' : 'image/webp';
+    
+    const now = performance.now();
+    const timeSinceLastFrame = now - this.lastFrameTime;
+    
+    // Adaptive frame dropping - skip if we're behind schedule
+    if (this.decodeInFlight && timeSinceLastFrame < this.targetFrameTime * 0.5) {
+      this.droppedFrames++;
+      if (this.debug && this.droppedFrames % 10 === 0) this.log('dropped frames', this.droppedFrames);
+      return;
+    }
+    
+    // Clean up old frame if exists
+    if (this.latestFrame) {
+      this.oldFrames.push(this.latestFrame);
+      if (this.oldFrames.length > 10) {
+        this.oldFrames.shift(); // Remove oldest
+      }
+    }
+    
     // Keep the WebSocket payload as bytes. The fast path decodes that buffer
     // directly, avoiding Blob URLs and the corresponding DevTools image rows.
-    this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer, 17) };
+    this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer, 17), receivedAt: now };
+    this.lastFrameTime = now;
+    
     if (!this.decodeInFlight && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); }
   }
   resizeRenderer() {
@@ -330,10 +357,14 @@ class RemoteBrowserClient {
       if (version === this.streamVersion) this.elements.stream.classList.add('active');
       if (version === this.streamVersion && this.resizeRenderer()) {
         const canvas = this.elements.stream;
+        // Use faster rendering with willReadFrequently hint off (default)
         this.streamContext.drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
         this.recordFrame(frame.timestamp);
       }
+      // Immediately dispose decoded frame to free memory
       decoded.dispose();
+      // Clear frame data reference
+      if (frame.bytes) frame.bytes = null;
     } catch (error) {
       this.log('frame decode failed', error);
     } finally {
@@ -344,12 +375,23 @@ class RemoteBrowserClient {
   scheduleLatestFrame() { if (this.latestFrame && !this.renderScheduled) { this.renderScheduled = true; requestAnimationFrame(() => this.renderLatestFrame()); } }
   recordFrame(timestamp) {
     clearTimeout(this.firstFrameTimeout); this.frameCount++; this.fpsCounter++; this.elements.frameCount.textContent = `${this.frameCount} frames`; const now = performance.now(), elapsed = now - this.lastFpsUpdate;
-    if (elapsed >= 1000) { this.elements.fpsDisplay.textContent = `${Math.round(this.fpsCounter * 1000 / elapsed)} FPS`; this.fpsCounter = 0; this.lastFpsUpdate = now; }
+    if (elapsed >= 1000) { 
+      const actualFps = Math.round(this.fpsCounter * 1000 / elapsed);
+      this.elements.fpsDisplay.textContent = `${actualFps} FPS`; 
+      this.fpsCounter = 0; this.lastFpsUpdate = now; 
+      // Log performance stats with dropped frames
+      if (this.debug) this.log('performance', `fps=${actualFps} dropped=${this.droppedFrames}`);
+      this.droppedFrames = 0;
+    }
     const latency = Math.max(0, Math.round(Date.now() - timestamp)); this.elements.latency.textContent = `${latency}ms`; this.elements.stream.classList.add('active'); this.hideLoadingSpinner();
-    if (this.frameCount % 24 === 0) this.log('frame stats', `fps=${this.elements.fpsDisplay.textContent} latency=${latency}ms rendered=24`);
+    if (this.frameCount % 24 === 0 && this.debug) this.log('frame stats', `fps=${this.elements.fpsDisplay.textContent} latency=${latency}ms rendered=24`);
   }
   resetStream() {
-    clearTimeout(this.startTimeout); clearTimeout(this.firstFrameTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.tabs = []; this.activeTabId = null; this.renderTabs(); this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
+    clearTimeout(this.startTimeout); clearTimeout(this.firstFrameTimeout); this.streamVersion++; this.sessionId = null; this.isStreaming = false; this.tabs = []; this.activeTabId = null; this.renderTabs(); 
+    
+    // Clean up all frame references to free memory
+    this.cleanupFrames();
+    this.latestFrame = null; this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
     if (this.streamContext) this.streamContext.clearRect(0, 0, this.elements.stream.width, this.elements.stream.height);
     this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
     this.elements.startStreamOption.style.display = 'flex'; this.elements.stopStreamOption.style.display = 'none'; this.updateStatus('connected', 'Connected');
@@ -359,8 +401,52 @@ class RemoteBrowserClient {
   truncateUrl(url) { return url.length > 60 ? `${url.slice(0, 60)}…` : url; }
   hideSuggestions() { this.elements.suggestions.classList.remove('active'); }
   showNotification(message, type = 'info') { const n = document.createElement('div'); n.className = `notification ${type}`; n.textContent = message; document.body.append(n); setTimeout(() => n.remove(), 5000); }
+  
+  // Memory management methods
+  startFrameCleanup() {
+    // Periodically clean up old frames every 5 seconds
+    this.frameCleanupInterval = setInterval(() => {
+      this.cleanupFrames();
+    }, 5000);
+  }
+  
+  cleanupFrames() {
+    // Clear old frame references
+    this.oldFrames.forEach(frame => {
+      if (frame.bytes) frame.bytes = null;
+    });
+    this.oldFrames = [];
+    
+    // Force garbage collection hint (not guaranteed but helps)
+    if (this.debug && this.oldFrames.length > 0) {
+      this.log('memory cleanup', `cleared ${this.oldFrames.length} old frames`);
+    }
+  }
+  
+  // Clean up on page unload
+  cleanup() {
+    clearInterval(this.frameCleanupInterval);
+    this.cleanupFrames();
+    if (this.latestFrame) {
+      if (this.latestFrame.bytes) this.latestFrame.bytes = null;
+      this.latestFrame = null;
+    }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
 }
 
 const style = document.createElement('style');
 style.textContent = '.notification{position:fixed;top:60px;right:20px;z-index:10000;max-width:400px;padding:12px 16px;border-radius:8px;background:#3b82f6;color:#fff;box-shadow:0 4px 12px #0004}.notification.error{background:#dc2626}.suggestion-item{width:100%;border:0;background:transparent;text-align:left;cursor:pointer;display:flex;gap:8px;align-items:center}.suggestion-item.active,.suggestion-item:hover{background:#f1f3f4}'; document.head.append(style);
-document.addEventListener('DOMContentLoaded', () => new RemoteBrowserClient());
+
+let clientInstance = null;
+document.addEventListener('DOMContentLoaded', () => {
+  clientInstance = new RemoteBrowserClient();
+});
+
+// Cleanup on page unload to free memory
+window.addEventListener('beforeunload', () => {
+  if (clientInstance) clientInstance.cleanup();
+});

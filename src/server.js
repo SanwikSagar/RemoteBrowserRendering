@@ -37,14 +37,43 @@ await browserPool.initialize();
 app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
 const server = app.listen(PORT, () => log(`listening on ${PORT}`, `debug=${DEBUG}`));
-const wss = new WebSocketServer({ server, maxPayload: 16 * 1024, perMessageDeflate: false });
+const wss = new WebSocketServer({ 
+  server, 
+  maxPayload: 16 * 1024, 
+  perMessageDeflate: false,
+  // Performance optimizations
+  clientTracking: true,
+  backlog: 100
+});
 const streamManager = new StreamManager(browserPool);
+
+// Periodic cleanup of stale sessions (every 30 seconds)
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of streamManager.sessions.entries()) {
+    // Clean up sessions with closed WebSocket connections
+    if (session.ws.readyState === session.ws.CLOSED || session.ws.readyState === session.ws.CLOSING) {
+      log('cleaning stale session', `session=${sessionId.slice(0, 8)}`);
+      streamManager.stopStream(sessionId).catch(() => {});
+    }
+  }
+}, 30_000);
 
 wss.on('connection', (ws) => {
   log('websocket connected');
-  let sessionId = null, starting = false, messages = 0;
+  let sessionId = null, starting = false, messages = 0, lastMessageTime = Date.now();
   const resetRate = setInterval(() => { messages = 0; }, 1000);
+  
+  // Set TCP keepalive to detect dead connections
+  if (ws._socket) {
+    ws._socket.setKeepAlive(true, 30000);
+    ws._socket.setNoDelay(true); // Disable Nagle's algorithm for lower latency
+  }
+  
   ws.on('message', async (message, isBinary) => {
+    const now = Date.now();
+    lastMessageTime = now;
+    
     if (isBinary || ++messages > 120 || message.length > 16 * 1024) return ws.close(1008, 'Invalid message rate');
     let data;
     try { data = JSON.parse(message.toString()); }
@@ -75,7 +104,36 @@ wss.on('connection', (ws) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'error', message: error.message || 'Request failed.' }));
     } finally { starting = false; }
   });
-  ws.on('close', async () => { clearInterval(resetRate); log('websocket closed', sessionId ? `session=${sessionId.slice(0, 8)}` : 'no session'); if (sessionId) await streamManager.stopStream(sessionId); });
+  
+  // Ping-pong to detect dead connections
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === ws.OPEN) {
+      // Check if no messages in the last 60 seconds and session is active
+      if (sessionId && Date.now() - lastMessageTime > 60_000) {
+        try {
+          ws.ping();
+        } catch (e) {
+          log('ping failed, closing connection', sessionId ? `session=${sessionId.slice(0, 8)}` : '');
+          ws.terminate();
+        }
+      }
+    }
+  }, 30_000);
+  
+  ws.on('pong', () => {
+    lastMessageTime = Date.now();
+  });
+  
+  ws.on('close', async () => { 
+    clearInterval(resetRate); 
+    clearInterval(pingInterval);
+    log('websocket closed', sessionId ? `session=${sessionId.slice(0, 8)}` : 'no session'); 
+    if (sessionId) await streamManager.stopStream(sessionId); 
+  });
+  
+  ws.on('error', (error) => {
+    log('websocket error', error.message || 'unknown');
+  });
 });
 
 const shutdown = async () => { await streamManager.cleanup(); await browserPool.cleanup(); server.close(); };

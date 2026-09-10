@@ -1,12 +1,41 @@
 import { randomUUID } from 'crypto';
 
-const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 192 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 24;
+const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 128 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 24;
 const DEBUG = process.env.DEBUG_STREAM === '1';
 const log = (message, details = '') => console.log(`[RBR] ${message}${details ? ` ${details}` : ''}`);
 const clamp = (value, min, max, fallback) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback;
 };
+
+// Memory-efficient frame buffer pool
+class FrameBufferPool {
+  constructor(maxBuffers = 5) {
+    this.pool = [];
+    this.maxBuffers = maxBuffers;
+  }
+  
+  acquire(size) {
+    const buffer = this.pool.find(b => b.length >= size);
+    if (buffer) {
+      this.pool = this.pool.filter(b => b !== buffer);
+      return buffer;
+    }
+    return Buffer.allocUnsafe(size);
+  }
+  
+  release(buffer) {
+    if (this.pool.length < this.maxBuffers && buffer.length <= 512 * 1024) {
+      this.pool.push(buffer);
+    }
+  }
+  
+  clear() {
+    this.pool = [];
+  }
+}
+
+const frameBufferPool = new FrameBufferPool();
 
 export function normalizeRemoteUrl(value) {
   const raw = String(value || '').trim();
@@ -50,23 +79,49 @@ export class StreamManager {
 
   async startScreencast(session, tab) {
     await session.stopScreencast?.();
-    let lastSentAt = 0;
+    let lastSentAt = 0, framesSent = 0, framesDropped = 0, lastHeader = null;
     const onFrame = ({ data, metadata, sessionId: frameId }) => {
       // Acknowledge immediately; Chrome otherwise retains screencast buffers.
       tab.cdp.send('Page.screencastFrameAck', { sessionId: frameId }).catch(() => {});
-      if (session.activeTabId !== tab.id || session.ws.readyState !== session.ws.OPEN || session.ws.bufferedAmount >= MAX_BUFFERED_BYTES) return;
+      if (session.activeTabId !== tab.id || session.ws.readyState !== session.ws.OPEN) return;
+      
+      // More aggressive backpressure - drop frames early
+      if (session.ws.bufferedAmount >= MAX_BUFFERED_BYTES) {
+        framesDropped++;
+        return;
+      }
+      
       const now = Date.now();
-      if (now - lastSentAt < (1000 / STREAM_FPS)) return;
+      const minFrameInterval = 1000 / STREAM_FPS;
+      if (now - lastSentAt < minFrameInterval) {
+        framesDropped++;
+        return;
+      }
+      
       const image = Buffer.from(data, 'base64');
       if (!image.length) return;
+      
       const width = Math.min(0xffff, Math.round((metadata.deviceWidth || session.settings.width) * session.settings.renderScale));
       const height = Math.min(0xffff, Math.round((metadata.deviceHeight || session.settings.height) * session.settings.renderScale));
-      const header = Buffer.allocUnsafe(17);
-      header.writeUInt8(2, 0); header.writeUInt32BE(session.frameNumber++, 1); header.writeDoubleBE(now, 5);
-      header.writeUInt16BE(width, 13); header.writeUInt16BE(height, 15);
-      session.ws.send(Buffer.concat([header, image]), { binary: true, compress: false });
+      
+      // Reuse header buffer to reduce allocations
+      if (!lastHeader) lastHeader = Buffer.allocUnsafe(17);
+      lastHeader.writeUInt8(2, 0); 
+      lastHeader.writeUInt32BE(session.frameNumber++, 1); 
+      lastHeader.writeDoubleBE(now, 5);
+      lastHeader.writeUInt16BE(width, 13); 
+      lastHeader.writeUInt16BE(height, 15);
+      
+      session.ws.send(Buffer.concat([lastHeader, image]), { binary: true, compress: false });
       lastSentAt = now;
-      if (DEBUG && session.frameNumber % STREAM_FPS === 0) log('screencast stats', `session=${session.id.slice(0, 8)} frames=${session.frameNumber} size=${Math.round(image.length / 1024)}KB`);
+      framesSent++;
+      
+      if (DEBUG && session.frameNumber % (STREAM_FPS * 2) === 0) {
+        const dropRate = framesDropped > 0 ? Math.round((framesDropped / (framesSent + framesDropped)) * 100) : 0;
+        log('screencast stats', `session=${session.id.slice(0, 8)} frames=${framesSent} dropped=${framesDropped} (${dropRate}%) size=${Math.round(image.length / 1024)}KB buffer=${Math.round(session.ws.bufferedAmount / 1024)}KB`);
+        framesSent = 0;
+        framesDropped = 0;
+      }
     };
     tab.cdp.on('Page.screencastFrame', onFrame);
     await tab.cdp.send('Page.startScreencast', {
@@ -78,6 +133,7 @@ export class StreamManager {
     session.stopScreencast = async () => {
       tab.cdp.off('Page.screencastFrame', onFrame);
       await tab.cdp.send('Page.stopScreencast').catch(() => {});
+      lastHeader = null; // Allow GC
     };
     log('screencast active', `session=${session.id.slice(0, 8)} tab=${tab.id.slice(0, 8)}`);
   }
@@ -133,6 +189,9 @@ export class StreamManager {
     await session.stop(); this.sessions.delete(sessionId); log('stream stopped', `session=${sessionId.slice(0, 8)}`);
     await Promise.all([...session.tabs.values()].map((tab) => tab.page.close().catch(() => {})));
     this.browserPool.release(session.browser);
+    // Clean up session memory
+    session.tabs.clear();
+    session.ws = null;
   }
   async createTab(sessionId, rawUrl = 'https://www.google.com') {
     const session = this.sessions.get(sessionId); if (!session) throw new Error('Unknown stream session.');
@@ -178,11 +237,12 @@ export class StreamManager {
         session.pendingScroll += clamp(action.deltaY, -2_000, 2_000, 0);
         if (!session.scrollScheduled) {
           session.scrollScheduled = true;
-          setTimeout(async () => {
+          // Immediate execution for better responsiveness
+          setImmediate(async () => {
             const delta = clamp(session.pendingScroll, -4_000, 4_000, 0);
             session.pendingScroll = 0; session.scrollScheduled = false;
             if (!page.isClosed() && delta) await page.evaluate((amount) => window.scrollBy(0, amount), delta).catch(() => {});
-          }, 0);
+          });
         }
         break;
       }
