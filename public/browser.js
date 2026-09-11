@@ -19,7 +19,7 @@ class RemoteBrowserClient {
     this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = [];
     this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
-    this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn','audioEnabled','audioPlayer'].map((id) => [id, document.getElementById(id)]));
+    this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn','audioBtn','audioIcon','audioPlayer'].map((id) => [id, document.getElementById(id)]));
     this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
     this.log('client initialized', `viewport=${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`); this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
   }
@@ -98,12 +98,26 @@ class RemoteBrowserClient {
     e.fullscreenBtn.addEventListener('click', () => this.toggleFullscreen());
     e.fullscreenExitBtn.addEventListener('click', () => this.toggleFullscreen());
     e.newTabBtn.addEventListener('click', () => this.createTab());
-    e.audioEnabled.addEventListener('change', () => this.toggleAudio(e.audioEnabled.checked));
+    e.audioBtn.addEventListener('click', () => { this.toggleAudio(!this.audioEnabled); });
     [e.fpsInput, e.qualityInput].forEach((input) => input.addEventListener('change', () => { this.fps(); this.quality(); this.savePreferences(); this.updateSettings(); }));
     document.addEventListener('pointerdown', (event) => { if (!e.settingsBtn.contains(event.target) && !e.settingsMenu.contains(event.target)) this.hideSettings(); if (!e.urlInput.closest('.url-bar').contains(event.target)) this.hideSuggestions(); });
-    e.stream.addEventListener('click', (event) => { if (Date.now() >= this.suppressClickUntil) this.handleClick(event); });
+    const focusStream = () => {
+      if (document.activeElement === e.urlInput) {
+        e.urlInput.blur();
+      }
+      this.hideSuggestions();
+      e.stream.focus?.({ preventScroll: true });
+    };
+    e.viewport.addEventListener('pointerdown', focusStream);
+    e.stream.addEventListener('pointerdown', (event) => {
+      focusStream();
+      this.handlePointerDown(event);
+    }, { passive: false });
+    e.stream.addEventListener('click', (event) => {
+      focusStream();
+      if (Date.now() >= this.suppressClickUntil) this.handleClick(event);
+    });
     e.stream.addEventListener('wheel', (event) => this.handleScroll(event), { passive: false });
-    e.stream.addEventListener('pointerdown', (event) => this.handlePointerDown(event), { passive: false });
     e.stream.addEventListener('pointermove', (event) => this.handlePointerMove(event), { passive: false });
     e.stream.addEventListener('pointerup', (event) => this.handlePointerUp(event), { passive: false });
     e.stream.addEventListener('pointercancel', () => { this.touchState = null; });
@@ -191,9 +205,13 @@ class RemoteBrowserClient {
     this.pendingScroll += deltaY;
     if (this.scrollScheduled) return;
     this.scrollScheduled = true;
+    // Batch over 2 rAF ticks (~32ms) to merge more scroll events into one
+    // WebSocket message, reducing message rate by ~50% during fast scrolling.
     requestAnimationFrame(() => {
-      this.sendInteraction({ type: 'scroll', deltaY: Math.round(Math.max(-2_000, Math.min(2_000, this.pendingScroll))) });
-      this.pendingScroll = 0; this.scrollScheduled = false;
+      requestAnimationFrame(() => {
+        this.sendInteraction({ type: 'scroll', deltaY: Math.round(Math.max(-2_000, Math.min(2_000, this.pendingScroll))) });
+        this.pendingScroll = 0; this.scrollScheduled = false;
+      });
     });
   }
   handlePointerDown(event) {
@@ -256,7 +274,7 @@ class RemoteBrowserClient {
     this.streamVersion++; this.latestFrame = null;
     this.elements.urlInput.value = url; this.savePreferences(); this.frameCount = this.fpsCounter = 0; this.showLoadingSpinner('Starting browser...', 'Loading page');
     this.log('starting stream', `${url} ${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`);
-    this.ws.send(JSON.stringify({ type: 'start', url, fps: this.fps(), quality: this.quality(), width: this.viewportWidth, height: this.viewportHeight, isMobile: this.isMobile, enableAudio: this.elements.audioEnabled.checked }));
+    this.ws.send(JSON.stringify({ type: 'start', url, fps: this.fps(), quality: this.quality(), width: this.viewportWidth, height: this.viewportHeight, isMobile: this.isMobile, enableAudio: this.audioEnabled }));
     clearTimeout(this.startTimeout); this.startTimeout = setTimeout(() => { if (!this.isStreaming) this.showNotification('The stream is taking longer than expected. Please try again.', 'error'); }, 45_000);
   }
   stopStream() { if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'stop', sessionId: this.sessionId })); else this.resetStream(); }
@@ -273,14 +291,14 @@ class RemoteBrowserClient {
     if (data.type === 'tabState') { this.tabs = Array.isArray(data.tabs) ? data.tabs : []; this.activeTabId = data.activeTabId; this.log('tabs updated', `${this.tabs.length} tabs`); this.renderTabs(); }
     if (data.type === 'stopped') this.resetStream();
     if (data.type === 'capabilities') {
-      const box = this.elements.audioEnabled, ok = Boolean(data.audio?.available);
-      box.disabled = !ok; box.closest('.menu-item')?.setAttribute('title', ok ? 'Stream tab audio' : `Audio unavailable: ${data.audio?.reason || 'server has no capture backend'}`);
-      if (!ok && box.checked) { box.checked = false; this.audioEnabled = false; this.teardownAudio(); }
+      const btn = this.elements.audioBtn, ok = Boolean(data.audio?.available);
+      btn.disabled = !ok; btn.title = ok ? (this.audioEnabled ? 'Mute Audio' : 'Unmute Audio') : `Audio unavailable: ${data.audio?.reason || 'server has no capture backend'}`;
+      if (!ok && this.audioEnabled) { this.audioEnabled = false; this.updateAudioIcon(); this.teardownAudio(); }
       if (!ok) this.log('audio unavailable', data.audio?.reason || '');
     }
     if (data.type === 'audioInit') { if (this.audioEnabled) this.setupAudio(data.mimeType); }
     if (data.type === 'audioError') {
-      this.audioEnabled = false; this.elements.audioEnabled.checked = false; this.teardownAudio();
+      this.audioEnabled = false; this.updateAudioIcon(); this.teardownAudio();
       this.showNotification(data.message || 'Audio is unavailable.', 'error');
     }
     if (data.type === 'error') { this.hideLoadingSpinner(); this.showNotification(data.message || 'Request failed.', 'error'); }
@@ -291,15 +309,22 @@ class RemoteBrowserClient {
     if (format === 3) this.receiveAudioChunk(buffer);
     else this.receiveFrame(buffer);
   }
+  updateAudioIcon() {
+    if (!this.elements.audioIcon) return;
+    this.elements.audioIcon.innerHTML = this.audioEnabled 
+      ? '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15.536a5 5 0 001.414 1.06m2.828-9.9a9 9 0 000 12.728"></path>' 
+      : '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 15.536a5 5 0 001.414 1.06m2.828-9.9a9 9 0 000 12.728M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M3 3l18 18"></path>';
+    this.elements.audioBtn.title = this.audioEnabled ? 'Mute Audio' : 'Unmute Audio';
+  }
   toggleAudio(enabled) {
-    const box = this.elements.audioEnabled;
-    if (!enabled) { this.audioEnabled = false; this.teardownAudio(); this.sendAudioCommand(false); return; }
+    if (!enabled) { this.audioEnabled = false; this.updateAudioIcon(); this.teardownAudio(); this.sendAudioCommand(false); return; }
     if (typeof MediaSource !== 'function' || !MediaSource.isTypeSupported(AUDIO_MIME_TYPE)) {
-      box.checked = false; this.audioEnabled = false;
+      this.audioEnabled = false; this.updateAudioIcon();
       this.showNotification('Audio streaming is not supported in this browser.', 'error');
       return;
     }
     this.audioEnabled = true;
+    this.updateAudioIcon();
     // Must happen inside the click handler: autoplay policy only honours play()
     // while a user gesture is active, and the server's first chunk arrives later.
     this.setupAudio(AUDIO_MIME_TYPE);
@@ -328,8 +353,9 @@ class RemoteBrowserClient {
     if (!this.audioEnabled) return;
     if (!this.mediaSource) this.setupAudio(AUDIO_MIME_TYPE);
     this.audioQueue.push(buffer.slice(9));
-    // Bound the queue so a stalled SourceBuffer cannot pin unbounded memory.
-    if (this.audioQueue.length > 120) { this.audioQueue.splice(0, this.audioQueue.length - 120); if (this.debug) this.log('audio queue overflow'); }
+    // Bound the queue: 40 chunks × ~20ms = 800ms max. Previous 120-chunk limit
+    // allowed 2.4s of buffered audio causing massive perceived lag.
+    if (this.audioQueue.length > 40) { this.audioQueue.splice(0, this.audioQueue.length - 40); if (this.debug) this.log('audio queue overflow'); }
     this.pumpAudioQueue();
   }
   pumpAudioQueue() {
@@ -343,15 +369,14 @@ class RemoteBrowserClient {
     const buffered = sb.buffered;
     if (buffered.length) {
       const start = buffered.start(0), end = buffered.end(buffered.length - 1);
-      // Evict played audio so the buffer does not grow for the whole session;
-      // the next updateend re-enters here and resumes pumping.
-      if (player.currentTime - start > 30) { try { sb.remove(start, player.currentTime - 10); return; } catch { /* fall through */ } }
-      // Live-edge tracking: a hard seek is audible, so drift under ~0.7s is
-      // absorbed by playing slightly fast; only a real stall jumps to the edge.
+      // Evict played audio aggressively: 10s retention (was 30s), 3s keepback (was 10s).
+      if (player.currentTime - start > 10) { try { sb.remove(start, player.currentTime - 3); return; } catch { /* fall through */ } }
+      // Aggressive live-edge tracking: hard seek at >400ms (was 700ms).
+      // Speed up at >200ms (was 350ms) with 1.12x rate (was 1.08x).
       const lag = end - player.currentTime;
-      if (lag > 0.7) { player.currentTime = end - 0.15; player.playbackRate = 1; }
-      else if (lag > 0.35) player.playbackRate = 1.08;
-      else if (player.playbackRate !== 1 && lag < 0.2) player.playbackRate = 1;
+      if (lag > 0.4) { player.currentTime = end - 0.1; player.playbackRate = 1; }
+      else if (lag > 0.2) player.playbackRate = 1.12;
+      else if (player.playbackRate !== 1 && lag < 0.12) player.playbackRate = 1;
       if (player.paused && this.audioEnabled) player.play().catch(() => {});
     }
     this.pumpAudioQueue();
@@ -376,7 +401,9 @@ class RemoteBrowserClient {
     if (this.latestFrame) { this.latestFrame.bytes = null; this.droppedFrames++; }
     
     // Store new frame
-    this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer, 17), receivedAt: now };
+    // Slice creates an owned copy of just the JPEG payload; the original ArrayBuffer
+    // can then be GC'd immediately instead of being pinned by the Uint8Array view.
+    this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer.slice(17)), receivedAt: now };
     this.lastFrameTime = now;
     
     // Immediate scheduling for lowest latency
@@ -406,12 +433,11 @@ class RemoteBrowserClient {
       }
     }
     
-    // Fast ImageBitmap fallback
+    // Fast ImageBitmap fallback – premultiplyAlpha:'none' skips alpha processing
+    // since our canvas is opaque (alpha:false), saving GPU work on every frame.
     const blob = new Blob([frame.bytes], { type: frame.mimeType });
     if (typeof createImageBitmap === 'function') {
-      // premultiplied alpha and the source color space keep the GPU upload on the
-      // fast path for an opaque canvas.
-      const bitmap = await createImageBitmap(blob, { imageOrientation: 'none', colorSpaceConversion: 'none' });
+      const bitmap = await createImageBitmap(blob, { imageOrientation: 'none', premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
       return { source: bitmap, dispose: () => bitmap.close() };
     }
     
@@ -440,24 +466,26 @@ class RemoteBrowserClient {
         const canvas = this.elements.stream;
         const source = decoded.source;
         const width = source.displayWidth || source.width, height = source.displayHeight || source.height;
-        // Backing store matches the encoded frame so the draw is a 1:1 blit and CSS
-        // hands the upscale to the compositor instead of resampling on the CPU.
         if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
         this.streamContext.drawImage(source, 0, 0);
         this.recordFrame(frame.timestamp);
       }
       
-      // Immediate disposal
       decoded.dispose();
-      if (frame.bytes) frame.bytes = null;
+      frame.bytes = null;
     } catch (error) {
       if (this.debug) this.log('frame decode failed', error.message);
     } finally {
       this.decodeInFlight = false;
-      // Check for next frame immediately
+      // Immediately start decoding the next frame if one arrived during decode.
+      // Using queueMicrotask instead of rAF eliminates the ~16ms vsync wait,
+      // keeping the decode pipeline saturated at all times.
       if (this.latestFrame && !this.renderScheduled) {
         this.renderScheduled = true;
-        requestAnimationFrame(() => this.renderLatestFrame());
+        queueMicrotask(() => {
+          this.renderScheduled = false;
+          this.renderLatestFrame();
+        });
       }
     }
   }

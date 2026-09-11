@@ -1,12 +1,12 @@
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 
-const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 64 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 30;
+const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 192 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 30;
 // Half a vCPU can encode roughly this many pixels per frame at the target rate.
 // Capture is scaled to fit the budget, then quality adapts around it.
-const PIXEL_BUDGET = 420_000, MIN_QUALITY = 30, MAX_QUALITY = 85, DEFAULT_QUALITY = 60, TUNE_INTERVAL_MS = 2_000;
+const PIXEL_BUDGET = 620_000, MIN_QUALITY = 30, MAX_QUALITY = 85, DEFAULT_QUALITY = 60, TUNE_INTERVAL_MS = 1_000;
 // Adaptive frame pacing: 30fps down to 12fps, then capture downscale to 60%.
-const MIN_FRAME_INTERVAL = Math.floor(1000 / STREAM_FPS), MAX_FRAME_INTERVAL = Math.floor(1000 / 12), MIN_SCALE = 0.6;
+const MIN_FRAME_INTERVAL = Math.floor(1000 / STREAM_FPS), MAX_FRAME_INTERVAL = Math.floor(1000 / 12), MIN_SCALE = 0.5;
 const DEBUG = process.env.DEBUG_STREAM === '1';
 
 // Chrome mixes every tab's output into one PulseAudio sink; ffmpeg reads that
@@ -185,24 +185,23 @@ export class StreamManager {
       }
       setImmediate(ack);
       
-      const imageSize = Buffer.byteLength(data, 'base64');
-      if (!imageSize) return;
+      // Pre-decode base64 once into a binary buffer; Buffer.from is significantly
+      // faster than packet.write(data, offset, 'base64') which re-parses per character.
+      const jpegBuf = Buffer.from(data, 'base64');
+      if (!jpegBuf.length) return;
       
       const width = Math.min(0xffff, metadata.deviceWidth || session.settings.width);
       const height = Math.min(0xffff, metadata.deviceHeight || session.settings.height);
       
-      // Header and payload share one allocation; decoding straight into the tail
-      // avoids an intermediate buffer and a full copy of every frame.
-      const packet = Buffer.allocUnsafe(17 + imageSize);
+      const packet = Buffer.allocUnsafe(17 + jpegBuf.length);
       packet.writeUInt8(2, 0);
       packet.writeUInt32BE(session.frameNumber++, 1);
       packet.writeDoubleBE(now, 5);
       packet.writeUInt16BE(width, 13);
       packet.writeUInt16BE(height, 15);
-      const written = packet.write(data, 17, 'base64');
-      if (!written) return;
+      jpegBuf.copy(packet, 17);
       
-      session.ws.send(written === imageSize ? packet : packet.subarray(0, 17 + written), { binary: true, compress: false });
+      session.ws.send(packet, { binary: true, compress: false });
       lastSentAt = now;
       framesSent++;
     };
@@ -220,14 +219,14 @@ export class StreamManager {
       if (encodeEma) {
         const overloaded = encodeEma > minFrameInterval * 1.25, relaxed = encodeEma < minFrameInterval * 0.5;
         if (overloaded) {
-          if (minFrameInterval < MAX_FRAME_INTERVAL) minFrameInterval = Math.min(MAX_FRAME_INTERVAL, Math.round(minFrameInterval * 1.35));
+          if (minFrameInterval < MAX_FRAME_INTERVAL) minFrameInterval = Math.min(MAX_FRAME_INTERVAL, Math.round(minFrameInterval * 1.25));
           else scale = Math.max(MIN_SCALE, Math.round((scale - 0.1) * 10) / 10);
         } else if (relaxed) {
           if (scale < 1) scale = Math.min(1, Math.round((scale + 0.1) * 10) / 10);
-          else if (minFrameInterval > MIN_FRAME_INTERVAL) minFrameInterval = Math.max(MIN_FRAME_INTERVAL, Math.round(minFrameInterval / 1.35));
+          else if (minFrameInterval > MIN_FRAME_INTERVAL) minFrameInterval = Math.max(MIN_FRAME_INTERVAL, Math.round(minFrameInterval / 1.25));
         }
-        if (congested) quality = Math.max(MIN_QUALITY, quality - 8);
-        else if (!overloaded) quality = Math.min(session.settings.quality, quality + 3);
+        if (congested) quality = Math.max(MIN_QUALITY, quality - 6);
+        else if (!overloaded) quality = Math.min(session.settings.quality, quality + 5);
       }
       if (DEBUG) {
         const total = framesSent + framesDropped;
@@ -341,15 +340,17 @@ export class StreamManager {
     
     const args = [
       '-hide_banner', '-nostdin', '-loglevel', DEBUG ? 'warning' : 'error',
-      '-fflags', 'nobuffer', '-flags', 'low_delay',
-      // 3840 bytes = 20ms of 48kHz stereo s16, matching one Opus frame.
-      '-f', 'pulse', '-fragment_size', '3840', '-i', AUDIO_SOURCE,
+      '-probesize', '32', '-analyzeduration', '0',
+      '-fflags', '+nobuffer+flush_packets', '-flags', 'low_delay',
+      '-thread_queue_size', '512',
+      // 1920 bytes = 20ms of 48kHz mono s16, matching one Opus frame exactly.
+      '-f', 'pulse', '-fragment_size', '1920', '-i', AUDIO_SOURCE,
       '-ac', '1', '-ar', '48000', '-vn',
       // compression_level 3 is ~1/3 the CPU of the default 10 for speech/music
       // at this bitrate; the sink is already mono 48k so no resampling happens.
-      '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-compression_level', '3', '-application', 'lowdelay', '-frame_duration', '20',
-      // ~120ms live clusters keep MSE latency low; each one is an independent append.
-      '-f', 'webm', '-live', '1', '-dash', '1', '-cluster_size_limit', '32K', '-cluster_time_limit', '120',
+      '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-compression_level', '0', '-application', 'lowdelay', '-frame_duration', '20',
+      // ~60ms live clusters keep MSE latency minimal; each one is an independent append.
+      '-f', 'webm', '-live', '1', '-dash', '1', '-cluster_size_limit', '16K', '-cluster_time_limit', '60',
       '-flush_packets', '1', 'pipe:1'
     ];
     let proc;
@@ -360,6 +361,8 @@ export class StreamManager {
     
     proc.stdout.on('data', (chunk) => {
       if (session.ws?.readyState !== session.ws?.OPEN) return;
+      // Drop audio when the WebSocket is congested to avoid starving video frames.
+      if (session.ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
       if (!initSent) {
         initSent = true;
         this.sendJson(session, { type: 'audioInit', mimeType: AUDIO_MIME_TYPE });

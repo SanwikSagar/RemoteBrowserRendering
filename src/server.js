@@ -51,7 +51,7 @@ const browserPool = new BrowserPool({
       // source buffer to a few seconds and makes MSE players (Instagram, YouTube,
       // TikTok) stall with "trouble playing this video" the moment the network
       // hiccups. The renderer-process limit above is what actually saves RAM.
-      '--js-flags=--max-old-space-size=192',
+      '--js-flags=--max-old-space-size=128 --lite-mode',
       // A single raster thread avoids oversubscribing half a vCPU
       '--num-raster-threads=1',
       // Network optimizations
@@ -79,6 +79,8 @@ const browserPool = new BrowserPool({
       '--hide-scrollbars',
       '--force-color-profile=srgb',
       '--disable-smooth-scrolling',
+      '--disable-canvas-aa',
+      '--disable-2d-canvas-clip-aa',
       '--enable-features=NetworkServiceInProcess',
       '--disable-blink-features=AutomationControlled'
     ] 
@@ -91,7 +93,7 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, '../public/index.ht
 const server = app.listen(PORT, () => log(`listening on ${PORT}`, `debug=${DEBUG}`));
 const wss = new WebSocketServer({ 
   server, 
-  maxPayload: 16 * 1024, 
+  maxPayload: 32 * 1024, 
   perMessageDeflate: false,
   // Performance optimizations
   clientTracking: true,
@@ -127,7 +129,7 @@ wss.on('connection', (ws) => {
     const now = Date.now();
     lastMessageTime = now;
     
-    if (isBinary || ++messages > 120 || message.length > 16 * 1024) return ws.close(1008, 'Invalid message rate');
+    if (isBinary || ++messages > 200 || message.length > 32 * 1024) return ws.close(1008, 'Invalid message rate');
     let data;
     try { data = JSON.parse(message.toString()); }
     catch { return ws.send(JSON.stringify({ type: 'error', message: 'Invalid message.' })); }

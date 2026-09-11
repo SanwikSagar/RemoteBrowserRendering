@@ -266,7 +266,7 @@
             border: 1px solid #dadce0;
             border-top: none;
             margin-top: -1px;
-            scroll-behavior: smooth;
+            scroll-behavior: auto;
         }
 
         .suggestions.active {
@@ -510,7 +510,6 @@
             justify-content: center;
             /* GPU acceleration */
             transform: translateZ(0);
-            will-change: transform;
         }
 
         #stream {
@@ -527,13 +526,13 @@
             background: #ffffff;
             /* Hardware-accelerated upscaling with crisp rendering */
             transform: translateZ(0);
-            will-change: transform;
+            will-change: contents;
             image-rendering: auto;
             backface-visibility: hidden;
             -webkit-backface-visibility: hidden;
-            /* Smooth sub-pixel rendering */
-            -webkit-font-smoothing: subpixel-antialiased;
-            -moz-osx-font-smoothing: grayscale;
+            /* Layout isolation: the canvas never affects outside layout */
+            contain: strict;
+            outline: none;
         }
 
         #stream.active {
@@ -907,6 +906,12 @@
             </div>
 
             <div class="browser-actions">
+                <button class="action-btn" id="audioBtn" title="Unmute Audio">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" id="audioIcon">
+                        <!-- Muted icon by default -->
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5.586 15.536a5 5 0 001.414 1.06m2.828-9.9a9 9 0 000 12.728M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M3 3l18 18"></path>
+                    </svg>
+                </button>
                 <button class="action-btn" id="settingsBtn" title="Settings">
                     <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
@@ -947,18 +952,8 @@
                                 <input type="number" id="qualityInput" min="30" max="85" value="60" step="5">
                             </div>
                         </div>
-                        <div class="menu-item no-hover">
-                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15.536a5 5 0 001.414 1.06m2.828-9.9a9 9 0 000 12.728"></path>
-                            </svg>
-                            <div class="menu-item-content">
-                                <span>Audio:</span>
-                                <label class="audio-toggle">
-                                    <input type="checkbox" id="audioEnabled">
-                                    <span class="toggle-slider"></span>
-                                </label>
-                                <audio id="audioPlayer" hidden></audio>
-                            </div>
+                        <div class="menu-item no-hover" style="display: none;">
+                            <audio id="audioPlayer" hidden></audio>
                         </div>
                 </div>
             </div>
@@ -969,7 +964,7 @@
             <div class="loading-bar" id="loadingBar"></div>
             
             <div class="viewport" id="viewport">
-                <canvas id="stream" aria-label="Browser Stream"></canvas>
+                <canvas id="stream" aria-label="Browser Stream" tabindex="0"></canvas>
                 
                 <!-- Placeholder -->
                 <div class="placeholder" id="placeholder">
@@ -1021,6 +1016,6 @@
         </div>
     </div>
 
-    <script src="browser.js?v=20260911.4"></script>
+    <script src="browser.js?v=20260911.6"></script>
 </body>
 </html>
