@@ -280,27 +280,41 @@ export class StreamManager {
     }
   }
   
+  sendJson(session, message) {
+    if (session.ws?.readyState === session.ws?.OPEN) session.ws.send(JSON.stringify(message));
+  }
+  failAudio(session, message) {
+    session.audioEnabled = false;
+    log('audio unavailable', `session=${session.id.slice(0, 8)} ${message}`);
+    this.sendJson(session, { type: 'audioError', message });
+  }
+
   async startAudioCapture(session) {
     await session.stopAudio?.();
     if (session.ws?.readyState !== session.ws?.OPEN) return;
     
     const args = [
-      '-hide_banner', '-loglevel', 'error',
-      '-f', 'pulse', '-i', AUDIO_SOURCE,
-      '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-vn',
-      // Small clusters keep latency low; each one is a self-contained MSE append.
-      '-f', 'webm', '-dash', '1', '-cluster_size_limit', '512K', '-cluster_time_limit', '250',
-      'pipe:1'
+      '-hide_banner', '-nostdin', '-loglevel', DEBUG ? 'warning' : 'error',
+      '-fflags', 'nobuffer', '-flags', 'low_delay',
+      // 3840 bytes = 20ms of 48kHz stereo s16, matching one Opus frame.
+      '-f', 'pulse', '-fragment_size', '3840', '-i', AUDIO_SOURCE,
+      '-ac', '1', '-ar', '48000', '-vn',
+      '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-application', 'lowdelay', '-frame_duration', '20',
+      // Small live clusters keep MSE latency low; each one is an independent append.
+      '-f', 'webm', '-live', '1', '-dash', '1', '-cluster_size_limit', '64K', '-cluster_time_limit', '200',
+      '-flush_packets', '1', 'pipe:1'
     ];
-    const proc = spawn(FFMPEG_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let proc;
+    try { proc = spawn(FFMPEG_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (error) { this.failAudio(session, `Audio capture could not start: ${error.message}`); return; }
     session.audioProcess = proc;
-    let initSent = false;
+    let initSent = false, stderrTail = '';
     
     proc.stdout.on('data', (chunk) => {
       if (session.ws?.readyState !== session.ws?.OPEN) return;
       if (!initSent) {
         initSent = true;
-        session.ws.send(JSON.stringify({ type: 'audioInit', mimeType: AUDIO_MIME_TYPE }));
+        this.sendJson(session, { type: 'audioInit', mimeType: AUDIO_MIME_TYPE });
       }
       // Format byte 3 marks an audio chunk; the video header layout doesn't apply.
       const packet = Buffer.allocUnsafe(9 + chunk.length);
@@ -309,11 +323,25 @@ export class StreamManager {
       chunk.copy(packet, 9);
       session.ws.send(packet, { binary: true, compress: false });
     });
-    proc.stderr.on('data', (data) => { if (DEBUG) log('ffmpeg audio', data.toString().trim()); });
-    proc.once('error', (error) => { log('audio capture failed', error.message); session.audioProcess = null; });
-    proc.once('exit', (code) => {
-      if (DEBUG) log('audio capture exited', `session=${session.id.slice(0, 8)} code=${code}`);
+    proc.stderr.on('data', (data) => {
+      const text = data.toString();
+      stderrTail = (stderrTail + text).slice(-400);
+      if (DEBUG) log('ffmpeg audio', text.trim());
+    });
+    proc.once('error', (error) => {
       if (session.audioProcess === proc) session.audioProcess = null;
+      const reason = error.code === 'ENOENT'
+        ? 'ffmpeg is not installed on the server. Deploy with the Docker image to enable audio.'
+        : `Audio capture failed: ${error.message}`;
+      this.failAudio(session, reason);
+    });
+    proc.once('exit', (code, signal) => {
+      // stopAudio clears audioProcess first, so a still-set reference means ffmpeg
+      // died on its own (missing PulseAudio sink, no libopus, etc.).
+      if (session.audioProcess !== proc) return;
+      session.audioProcess = null;
+      const detail = stderrTail.trim().split('\n').pop() || `exit ${code ?? signal}`;
+      this.failAudio(session, `Audio capture stopped: ${detail}`);
     });
     
     session.stopAudio = async () => {

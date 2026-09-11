@@ -1,20 +1,15 @@
 services:
-  # Native Node runtime: video streaming works, but audio capture needs
-  # ffmpeg + pulseaudio, which aren't available here. Use a Docker-based
-  # Render service (see Dockerfile) if audio is required.
+  # Docker runtime is required for audio: the image ships ffmpeg + PulseAudio
+  # and docker-entrypoint.sh creates the virtual sink Chrome renders into.
+  # Render's native Node runtime has neither, so audio would silently fail.
   - type: web
     name: remote-browser-backend
-    runtime: node
+    runtime: docker
     plan: free
-    buildCommand: npm install --production
-    startCommand: npm start
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: NODE_ENV
         value: production
-      - key: NODE_VERSION
-        value: 20.18.1
-      - key: PORT
-        value: 10000
-      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
-        value: false
+      - key: MAX_BROWSERS
+        value: 1
     healthCheckPath: /health

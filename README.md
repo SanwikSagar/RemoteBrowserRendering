@@ -134,6 +134,12 @@ before `npm start` runs.
 See [OCI_DEPLOY.md](OCI_DEPLOY.md) for full guide deploying to Ampere A1 shape using [docker-compose.oracle.yml](docker-compose.oracle.yml).
 
 ### Render.com (free plan constraints)
+The included `render.yaml` uses the **Docker** runtime. This matters for audio:
+Render's native Node runtime has no ffmpeg or PulseAudio, so the Audio toggle
+would fail with "ffmpeg is not installed on the server". If your existing
+service was created as a Node service, delete it and re-create from the
+Blueprint (runtime cannot be changed in place).
+
 `MAX_BROWSERS` must stay at `1` — a second Chromium instance will OOM a 512MB
 container. Capture resolution and JPEG quality already adapt to a ~0.5 vCPU
 budget (see `PIXEL_BUDGET` / quality tuner in `streamManager.js`); raising

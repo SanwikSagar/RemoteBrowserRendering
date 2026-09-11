@@ -1,3 +1,5 @@
+const AUDIO_MIME_TYPE = 'audio/webm; codecs="opus"';
+
 class RemoteBrowserClient {
   constructor() {
     this.debug = new URLSearchParams(location.search).has('debug') || localStorage.getItem('remote-browser-debug') === '1';
@@ -14,7 +16,7 @@ class RemoteBrowserClient {
     // Aggressive performance optimization
     this.droppedFrames = 0; this.lastFrameTime = 0; this.targetFrameTime = 1000 / 30; // 30 FPS target
     // Audio streaming: an MSE-backed <audio> element fed by Opus/WebM chunks
-    this.audioEnabled = false; this.mediaSource = null; this.sourceBuffer = null; this.audioQueue = [];
+    this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = [];
     this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn','audioEnabled','audioPlayer'].map((id) => [id, document.getElementById(id)]));
@@ -270,7 +272,11 @@ class RemoteBrowserClient {
     if (data.type === 'pageInfo' && data.url) { this.elements.currentUrl.textContent = this.truncateUrl(data.url); this.elements.currentUrl.title = data.url; this.elements.urlInput.value = data.url; this.elements.windowTitle.textContent = data.title || 'Zar Browser'; }
     if (data.type === 'tabState') { this.tabs = Array.isArray(data.tabs) ? data.tabs : []; this.activeTabId = data.activeTabId; this.log('tabs updated', `${this.tabs.length} tabs`); this.renderTabs(); }
     if (data.type === 'stopped') this.resetStream();
-    if (data.type === 'audioInit') this.setupAudio(data.mimeType);
+    if (data.type === 'audioInit') { if (this.audioEnabled) this.setupAudio(data.mimeType); }
+    if (data.type === 'audioError') {
+      this.audioEnabled = false; this.elements.audioEnabled.checked = false; this.teardownAudio();
+      this.showNotification(data.message || 'Audio is unavailable.', 'error');
+    }
     if (data.type === 'error') { this.hideLoadingSpinner(); this.showNotification(data.message || 'Request failed.', 'error'); }
   }
   receiveBinary(buffer) {
@@ -280,30 +286,44 @@ class RemoteBrowserClient {
     else this.receiveFrame(buffer);
   }
   toggleAudio(enabled) {
-    this.audioEnabled = enabled;
-    if (!this.sessionId || this.ws?.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify({ type: 'audio', sessionId: this.sessionId, enabled }));
-    if (enabled) this.elements.audioPlayer.play().catch(() => {});
-    else this.teardownAudio();
+    const box = this.elements.audioEnabled;
+    if (!enabled) { this.audioEnabled = false; this.teardownAudio(); this.sendAudioCommand(false); return; }
+    if (typeof MediaSource !== 'function' || !MediaSource.isTypeSupported(AUDIO_MIME_TYPE)) {
+      box.checked = false; this.audioEnabled = false;
+      this.showNotification('Audio streaming is not supported in this browser.', 'error');
+      return;
+    }
+    this.audioEnabled = true;
+    // Must happen inside the click handler: autoplay policy only honours play()
+    // while a user gesture is active, and the server's first chunk arrives later.
+    this.setupAudio(AUDIO_MIME_TYPE);
+    this.sendAudioCommand(true);
+  }
+  sendAudioCommand(enabled) {
+    if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'audio', sessionId: this.sessionId, enabled }));
   }
   setupAudio(mimeType) {
     if (this.mediaSource || typeof MediaSource !== 'function' || !MediaSource.isTypeSupported(mimeType)) return;
+    const player = this.elements.audioPlayer;
     this.mediaSource = new MediaSource();
-    this.elements.audioPlayer.src = URL.createObjectURL(this.mediaSource);
+    this.mediaSourceUrl = URL.createObjectURL(this.mediaSource);
+    player.src = this.mediaSourceUrl;
     this.mediaSource.addEventListener('sourceopen', () => {
       if (!this.mediaSource || this.mediaSource.readyState !== 'open') return;
       this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
       this.sourceBuffer.mode = 'sequence';
-      this.sourceBuffer.addEventListener('updateend', () => this.pumpAudioQueue());
+      this.sourceBuffer.addEventListener('updateend', () => this.onAudioUpdateEnd());
+      this.sourceBuffer.addEventListener('error', () => { if (this.debug) this.log('audio SourceBuffer error'); });
       this.pumpAudioQueue();
     }, { once: true });
-    this.elements.audioPlayer.play().catch(() => {});
+    player.play().catch((error) => { if (this.debug) this.log('audio play blocked', error.message); });
   }
   receiveAudioChunk(buffer) {
     if (!this.audioEnabled) return;
+    if (!this.mediaSource) this.setupAudio(AUDIO_MIME_TYPE);
     this.audioQueue.push(buffer.slice(9));
     // Bound the queue so a stalled SourceBuffer cannot pin unbounded memory.
-    if (this.audioQueue.length > 60) this.audioQueue.splice(0, this.audioQueue.length - 60);
+    if (this.audioQueue.length > 120) { this.audioQueue.splice(0, this.audioQueue.length - 120); if (this.debug) this.log('audio queue overflow'); }
     this.pumpAudioQueue();
   }
   pumpAudioQueue() {
@@ -311,11 +331,26 @@ class RemoteBrowserClient {
     try { this.sourceBuffer.appendBuffer(this.audioQueue.shift()); }
     catch (error) { if (this.debug) this.log('audio append failed', error.message); }
   }
+  onAudioUpdateEnd() {
+    const sb = this.sourceBuffer, player = this.elements.audioPlayer;
+    if (!sb || sb.updating) return;
+    const buffered = sb.buffered;
+    if (buffered.length) {
+      const start = buffered.start(0), end = buffered.end(buffered.length - 1);
+      // Evict played audio so the buffer does not grow for the whole session;
+      // the next updateend re-enters here and resumes pumping.
+      if (player.currentTime - start > 30) { try { sb.remove(start, player.currentTime - 10); return; } catch { /* fall through */ } }
+      // Live stream: never let playback lag the newest cluster by more than ~1.5s.
+      if (end - player.currentTime > 1.5) player.currentTime = end - 0.25;
+      if (player.paused && this.audioEnabled) player.play().catch(() => {});
+    }
+    this.pumpAudioQueue();
+  }
   teardownAudio() {
     this.audioQueue = []; this.sourceBuffer = null;
     const player = this.elements.audioPlayer;
     player.pause(); player.removeAttribute('src'); player.load();
-    if (this.mediaSource) { try { URL.revokeObjectURL(player.src); } catch { /* already revoked */ } }
+    if (this.mediaSourceUrl) { URL.revokeObjectURL(this.mediaSourceUrl); this.mediaSourceUrl = null; }
     this.mediaSource = null;
   }
   receiveFrame(buffer) {
