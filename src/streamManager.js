@@ -101,6 +101,15 @@ export class StreamManager {
     // start evicting/truncating large media responses under memory pressure.
     await cdp.send('Network.enable', { maxTotalBufferSize: 0, maxResourceBufferSize: 0 }).catch(() => {});
     await cdp.send('Network.setBlockedURLs', { urls: BLOCKED_URLS }).catch(() => {});
+    // Headless pages report themselves as hidden/unfocused, so sites pause video,
+    // throttle rAF loops and skip repaints - and the screencast only emits a
+    // frame when the compositor repaints. Pretend the tab is a focused, visible
+    // foreground window; touch emulation also makes mobile sites bind tap handlers.
+    await Promise.all([
+      cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }),
+      cdp.send('Page.setWebLifecycleState', { state: 'active' }),
+      settings.isMobile ? cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }) : Promise.resolve()
+    ].map((p) => p.catch(() => {})));
     return cdp;
   }
 
