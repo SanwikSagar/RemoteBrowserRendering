@@ -346,8 +346,12 @@ class RemoteBrowserClient {
       // Evict played audio so the buffer does not grow for the whole session;
       // the next updateend re-enters here and resumes pumping.
       if (player.currentTime - start > 30) { try { sb.remove(start, player.currentTime - 10); return; } catch { /* fall through */ } }
-      // Live stream: never let playback lag the newest cluster by more than ~1.5s.
-      if (end - player.currentTime > 1.5) player.currentTime = end - 0.25;
+      // Live-edge tracking: a hard seek is audible, so drift under ~0.7s is
+      // absorbed by playing slightly fast; only a real stall jumps to the edge.
+      const lag = end - player.currentTime;
+      if (lag > 0.7) { player.currentTime = end - 0.15; player.playbackRate = 1; }
+      else if (lag > 0.35) player.playbackRate = 1.08;
+      else if (player.playbackRate !== 1 && lag < 0.2) player.playbackRate = 1;
       if (player.paused && this.audioEnabled) player.play().catch(() => {});
     }
     this.pumpAudioQueue();

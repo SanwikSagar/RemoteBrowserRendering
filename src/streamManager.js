@@ -5,6 +5,8 @@ const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 64 * 1024, START
 // Half a vCPU can encode roughly this many pixels per frame at the target rate.
 // Capture is scaled to fit the budget, then quality adapts around it.
 const PIXEL_BUDGET = 420_000, MIN_QUALITY = 30, MAX_QUALITY = 85, DEFAULT_QUALITY = 60, TUNE_INTERVAL_MS = 2_000;
+// Adaptive frame pacing: 30fps down to 12fps, then capture downscale to 60%.
+const MIN_FRAME_INTERVAL = Math.floor(1000 / STREAM_FPS), MAX_FRAME_INTERVAL = Math.floor(1000 / 12), MIN_SCALE = 0.6;
 const DEBUG = process.env.DEBUG_STREAM === '1';
 
 // Chrome mixes every tab's output into one PulseAudio sink; ffmpeg reads that
@@ -150,13 +152,12 @@ export class StreamManager {
   async startScreencast(session, tab) {
     await session.stopScreencast?.();
     let lastSentAt = 0, framesSent = 0, framesDropped = 0, ackTimer = null, ackAt = 0, encodeEma = 0;
-    let quality = session.settings.quality;
-    const minFrameInterval = Math.floor(1000 / STREAM_FPS);
+    let quality = session.settings.quality, scale = 1, minFrameInterval = MIN_FRAME_INTERVAL;
     const applyCaptureSettings = () => tab.cdp.send('Page.startScreencast', {
       format: 'jpeg',
       quality,
-      maxWidth: Math.round(session.settings.width * session.settings.renderScale),
-      maxHeight: Math.round(session.settings.height * session.settings.renderScale),
+      maxWidth: Math.round(session.settings.width * session.settings.renderScale * scale),
+      maxHeight: Math.round(session.settings.height * session.settings.renderScale * scale),
       everyNthFrame: 1
     });
     
@@ -209,21 +210,31 @@ export class StreamManager {
     tab.cdp.on('Page.screencastFrame', onFrame);
     await applyCaptureSettings();
     
-    // Encoding is the scarce resource on a small instance, so quality is spent
-    // only while the target frame rate is actually being met.
+    // JPEG encode cost is per pixel, so quality barely moves CPU load; it is a
+    // bandwidth lever only. When Chrome cannot deliver frames within budget the
+    // real fixes are a lower frame rate, then fewer pixels - in that order, since
+    // a steady 15fps reads better than a smeared 30fps.
     const tuneTimer = setInterval(() => {
       const congested = (session.ws?.bufferedAmount || 0) > MAX_BUFFERED_BYTES / 2;
-      const previous = quality;
+      const prevQuality = quality, prevScale = scale;
       if (encodeEma) {
-        if (congested || encodeEma > minFrameInterval * 1.6) quality = Math.max(MIN_QUALITY, quality - 6);
-        else if (encodeEma < minFrameInterval * 0.8) quality = Math.min(session.settings.quality, quality + 3);
+        const overloaded = encodeEma > minFrameInterval * 1.25, relaxed = encodeEma < minFrameInterval * 0.5;
+        if (overloaded) {
+          if (minFrameInterval < MAX_FRAME_INTERVAL) minFrameInterval = Math.min(MAX_FRAME_INTERVAL, Math.round(minFrameInterval * 1.35));
+          else scale = Math.max(MIN_SCALE, Math.round((scale - 0.1) * 10) / 10);
+        } else if (relaxed) {
+          if (scale < 1) scale = Math.min(1, Math.round((scale + 0.1) * 10) / 10);
+          else if (minFrameInterval > MIN_FRAME_INTERVAL) minFrameInterval = Math.max(MIN_FRAME_INTERVAL, Math.round(minFrameInterval / 1.35));
+        }
+        if (congested) quality = Math.max(MIN_QUALITY, quality - 8);
+        else if (!overloaded) quality = Math.min(session.settings.quality, quality + 3);
       }
       if (DEBUG) {
         const total = framesSent + framesDropped;
-        log('screencast stats', `session=${session.id.slice(0, 8)} fps=${Math.round(framesSent / (TUNE_INTERVAL_MS / 1000))} dropped=${total ? Math.round((framesDropped / total) * 100) : 0}% encode=${Math.round(encodeEma)}ms q=${quality}`);
+        log('screencast stats', `session=${session.id.slice(0, 8)} fps=${Math.round(framesSent / (TUNE_INTERVAL_MS / 1000))} target=${Math.round(1000 / minFrameInterval)} dropped=${total ? Math.round((framesDropped / total) * 100) : 0}% encode=${Math.round(encodeEma)}ms q=${quality} scale=${scale}`);
       }
       framesSent = 0; framesDropped = 0;
-      if (quality !== previous) applyCaptureSettings().catch(() => {});
+      if (quality !== prevQuality || scale !== prevScale) applyCaptureSettings().catch(() => {});
     }, TUNE_INTERVAL_MS);
     
     session.stopScreencast = async () => {
@@ -334,9 +345,11 @@ export class StreamManager {
       // 3840 bytes = 20ms of 48kHz stereo s16, matching one Opus frame.
       '-f', 'pulse', '-fragment_size', '3840', '-i', AUDIO_SOURCE,
       '-ac', '1', '-ar', '48000', '-vn',
-      '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-application', 'lowdelay', '-frame_duration', '20',
-      // Small live clusters keep MSE latency low; each one is an independent append.
-      '-f', 'webm', '-live', '1', '-dash', '1', '-cluster_size_limit', '64K', '-cluster_time_limit', '200',
+      // compression_level 3 is ~1/3 the CPU of the default 10 for speech/music
+      // at this bitrate; the sink is already mono 48k so no resampling happens.
+      '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-compression_level', '3', '-application', 'lowdelay', '-frame_duration', '20',
+      // ~120ms live clusters keep MSE latency low; each one is an independent append.
+      '-f', 'webm', '-live', '1', '-dash', '1', '-cluster_size_limit', '32K', '-cluster_time_limit', '120',
       '-flush_packets', '1', 'pipe:1'
     ];
     let proc;

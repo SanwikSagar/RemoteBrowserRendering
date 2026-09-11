@@ -13,10 +13,14 @@ export PULSE_SINK=virtual_speaker
 if command -v pulseaudio >/dev/null 2>&1; then
   # -n skips the stock default.pa, which probes ALSA/udev hardware that does not
   # exist in a container and can abort startup. Load only what capture needs.
+  # The sink is mono 48k to match the Opus encoder, so Chrome renders straight
+  # into the capture format and neither PulseAudio nor ffmpeg has to resample.
+  # no-cpu-limit stops the daemon killing itself on a contended half-vCPU.
   pulseaudio --daemonize=yes --exit-idle-time=-1 --disallow-exit \
-    --realtime=no --high-priority=no --log-target=stderr -n \
+    --realtime=no --high-priority=no --no-cpu-limit=yes --resample-method=trivial \
+    --log-target=stderr -n \
     -L "module-native-protocol-unix auth-anonymous=1 socket=$XDG_RUNTIME_DIR/pulse/native" \
-    -L "module-null-sink sink_name=virtual_speaker sink_properties=device.description=virtual_speaker" \
+    -L "module-null-sink sink_name=virtual_speaker rate=48000 channels=1 sink_properties=device.description=virtual_speaker" \
     -L "module-always-sink" \
     2>/tmp/pulseaudio.log \
     || { echo "[entrypoint] pulseaudio failed to start; audio capture disabled" >&2; cat /tmp/pulseaudio.log >&2; }
