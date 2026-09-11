@@ -272,6 +272,12 @@ class RemoteBrowserClient {
     if (data.type === 'pageInfo' && data.url) { this.elements.currentUrl.textContent = this.truncateUrl(data.url); this.elements.currentUrl.title = data.url; this.elements.urlInput.value = data.url; this.elements.windowTitle.textContent = data.title || 'Zar Browser'; }
     if (data.type === 'tabState') { this.tabs = Array.isArray(data.tabs) ? data.tabs : []; this.activeTabId = data.activeTabId; this.log('tabs updated', `${this.tabs.length} tabs`); this.renderTabs(); }
     if (data.type === 'stopped') this.resetStream();
+    if (data.type === 'capabilities') {
+      const box = this.elements.audioEnabled, ok = Boolean(data.audio?.available);
+      box.disabled = !ok; box.closest('.menu-item')?.setAttribute('title', ok ? 'Stream tab audio' : `Audio unavailable: ${data.audio?.reason || 'server has no capture backend'}`);
+      if (!ok && box.checked) { box.checked = false; this.audioEnabled = false; this.teardownAudio(); }
+      if (!ok) this.log('audio unavailable', data.audio?.reason || '');
+    }
     if (data.type === 'audioInit') { if (this.audioEnabled) this.setupAudio(data.mimeType); }
     if (data.type === 'audioError') {
       this.audioEnabled = false; this.elements.audioEnabled.checked = false; this.teardownAudio();

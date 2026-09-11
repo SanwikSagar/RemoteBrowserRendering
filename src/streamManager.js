@@ -74,7 +74,32 @@ export function normalizeRemoteUrl(value) {
 }
 
 export class StreamManager {
-  constructor(browserPool) { this.browserPool = browserPool; this.sessions = new Map(); }
+  constructor(browserPool) { this.browserPool = browserPool; this.sessions = new Map(); this.audioStatus = { available: false, reason: 'Audio self-test has not run yet.' }; }
+
+  // Runs once at boot. A 0.3s capture from the monitor source proves every link
+  // - ffmpeg binary, PulseAudio daemon, the virtual sink - in one shot, so the
+  // failure shows up in the deploy log instead of as silence for the user.
+  async probeAudio() {
+    const run = (args, timeoutMs) => new Promise((resolve) => {
+      let proc, stderr = '';
+      try { proc = spawn(FFMPEG_PATH, args, { stdio: ['ignore', 'ignore', 'pipe'] }); }
+      catch (error) { return resolve({ code: null, stderr: error.message }); }
+      const timer = setTimeout(() => proc.kill('SIGKILL'), timeoutMs);
+      proc.stderr.on('data', (d) => { stderr = (stderr + d).slice(-600); });
+      proc.once('error', (error) => { clearTimeout(timer); resolve({ code: null, stderr: error.code === 'ENOENT' ? 'ffmpeg is not installed' : error.message }); });
+      proc.once('exit', (code) => { clearTimeout(timer); resolve({ code, stderr }); });
+    });
+    const version = await run(['-hide_banner', '-version'], 5_000);
+    if (version.code !== 0) { this.audioStatus = { available: false, reason: `ffmpeg unavailable: ${version.stderr.trim().split('\n')[0] || 'not found'}` }; }
+    else {
+      const capture = await run(['-hide_banner', '-loglevel', 'error', '-f', 'pulse', '-i', AUDIO_SOURCE, '-t', '0.3', '-f', 'null', '-'], 8_000);
+      this.audioStatus = capture.code === 0
+        ? { available: true, reason: '' }
+        : { available: false, reason: `PulseAudio source "${AUDIO_SOURCE}" unreadable: ${capture.stderr.trim().split('\n').pop() || 'capture failed'}` };
+    }
+    log('audio self-test', this.audioStatus.available ? `ok source=${AUDIO_SOURCE}` : this.audioStatus.reason);
+    return this.audioStatus;
+  }
 
   async configurePage(page, settings) {
     const cdp = await page.target().createCDPSession();
@@ -301,6 +326,7 @@ export class StreamManager {
   async startAudioCapture(session) {
     await session.stopAudio?.();
     if (session.ws?.readyState !== session.ws?.OPEN) return;
+    if (!this.audioStatus.available) { this.failAudio(session, this.audioStatus.reason); return; }
     
     const args = [
       '-hide_banner', '-nostdin', '-loglevel', DEBUG ? 'warning' : 'error',

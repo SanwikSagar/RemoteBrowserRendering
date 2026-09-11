@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     xdg-utils \
     pulseaudio \
+    pulseaudio-utils \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 

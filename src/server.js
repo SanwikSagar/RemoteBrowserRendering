@@ -28,6 +28,10 @@ const browserPool = new BrowserPool({
   maxBrowsers: Number(process.env.MAX_BROWSERS) || 1,
   launchOptions: { 
     headless: true, 
+    // Puppeteer appends --mute-audio to every headless launch. It has to be
+    // stripped here, or Chrome renders silence into the PulseAudio sink no
+    // matter what flags are passed below.
+    ignoreDefaultArgs: ['--mute-audio'],
     args: [
       // Security
       '--no-sandbox', '--disable-setuid-sandbox',
@@ -82,7 +86,7 @@ const browserPool = new BrowserPool({
 });
 await browserPool.initialize();
 
-app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime(), audio: streamManager.audioStatus }));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
 const server = app.listen(PORT, () => log(`listening on ${PORT}`, `debug=${DEBUG}`));
 const wss = new WebSocketServer({ 
@@ -94,6 +98,7 @@ const wss = new WebSocketServer({
   backlog: 100
 });
 const streamManager = new StreamManager(browserPool);
+streamManager.probeAudio().catch(() => {});
 
 // Periodic cleanup of stale sessions (every 30 seconds)
 setInterval(() => {
@@ -108,6 +113,7 @@ setInterval(() => {
 
 wss.on('connection', (ws) => {
   log('websocket connected');
+  ws.send(JSON.stringify({ type: 'capabilities', audio: streamManager.audioStatus }));
   let sessionId = null, starting = false, messages = 0, lastMessageTime = Date.now();
   const resetRate = setInterval(() => { messages = 0; }, 1000);
   
