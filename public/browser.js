@@ -318,6 +318,7 @@ class RemoteBrowserClient {
     if (this.mediaSource) { try { URL.revokeObjectURL(player.src); } catch { /* already revoked */ } }
     this.mediaSource = null;
   }
+  receiveFrame(buffer) {
     if (buffer.byteLength < 18) return;
     const view = new DataView(buffer), format = view.getUint8(0);
     if (format !== 1 && format !== 2) return;
