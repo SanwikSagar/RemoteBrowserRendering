@@ -30,6 +30,15 @@
   a WebP/tile-diffing protocol that no longer exists in the code).
 
 ### Fixed
+- Video playback (Instagram Reels, YouTube, etc.) showed "trouble playing this
+  video": the default `Network.setBlockedURLs` list included `*.mp4`/`*.webm`
+  globs that also match MSE segment URLs, so every media fetch was aborted.
+  Media blocking is now opt-in via `BLOCK_MEDIA=1`. Also dropped
+  `--enable-low-end-device-mode`, which caps the MSE buffer to a few seconds
+  and stalls players on any network hiccup.
+- Navigation to a URL with a bad certificate / DNS failure streamed Chrome's
+  raw error interstitial as if it were the page. Fatal `net::ERR_*` failures
+  now abort with a human-readable message.
 - `browser.js` crashed on load (`ReferenceError: global is not defined`) from
   a leftover Node-only `global.gc()` call in client code.
 - `ImageDecoder` was being reused across frames; a decoder is bound to the

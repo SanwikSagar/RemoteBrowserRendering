@@ -38,10 +38,14 @@ const browserPool = new BrowserPool({
       '--disable-extensions',
       '--disable-plugins',
       // One shared renderer keeps the process count, and therefore RSS, low enough
-      // to survive a 512MB container.
-      '--disable-features=IsolateOrigins,site-per-process,TranslateUI,BackForwardCache,AcceptCHFrame',
+      // to survive a 512MB container. AudioServiceOutOfProcess is disabled for the
+      // same reason: audio stays in the browser process instead of spawning another.
+      '--disable-features=IsolateOrigins,site-per-process,TranslateUI,BackForwardCache,AcceptCHFrame,AudioServiceOutOfProcess',
       '--renderer-process-limit=1',
-      '--enable-low-end-device-mode',
+      // Deliberately NOT --enable-low-end-device-mode: it shrinks the media
+      // source buffer to a few seconds and makes MSE players (Instagram, YouTube,
+      // TikTok) stall with "trouble playing this video" the moment the network
+      // hiccups. The renderer-process limit above is what actually saves RAM.
       '--js-flags=--max-old-space-size=192',
       // A single raster thread avoids oversubscribing half a vCPU
       '--num-raster-threads=1',

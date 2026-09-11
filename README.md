@@ -121,14 +121,17 @@ Audio: `[u8 format=3][f64 BE timestamp][WebM/Opus bytes]`
 
 ## Deployment
 
-### Docker
+### Docker (Recommended)
 ```bash
 docker build -t remote-browser .
 docker run -p 3000:3000 remote-browser
 ```
 The image installs `chromium`, `pulseaudio`, and `ffmpeg`, and
-`docker-entrypoint.sh` starts PulseAudio and the `virtual_speaker` null sink
+[docker-entrypoint.sh](docker-entrypoint.sh) starts PulseAudio and the `virtual_speaker` null sink
 before `npm start` runs.
+
+### Oracle Cloud (Always Free ARM)
+See [OCI_DEPLOY.md](OCI_DEPLOY.md) for full guide deploying to Ampere A1 shape using [docker-compose.oracle.yml](docker-compose.oracle.yml).
 
 ### Render.com (free plan constraints)
 `MAX_BROWSERS` must stay at `1` — a second Chromium instance will OOM a 512MB
@@ -143,6 +146,7 @@ after that pays a cold start including a fresh Chromium + PulseAudio launch.
 PORT=3000                       # HTTP/WS port
 MAX_BROWSERS=1                  # Concurrent Puppeteer browsers
 DEBUG_STREAM=1                  # Verbose screencast/audio/command logging
+BLOCK_MEDIA=1                   # Opt-in: block video/audio files to save bandwidth (breaks players)
 FFMPEG_PATH=ffmpeg              # Override if ffmpeg isn't on PATH
 PULSE_AUDIO_SOURCE=virtual_speaker.monitor
 AUDIO_BITRATE=32k

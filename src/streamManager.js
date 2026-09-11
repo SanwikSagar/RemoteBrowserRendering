@@ -15,19 +15,51 @@ const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '32k';
 const AUDIO_MIME_TYPE = 'audio/webm; codecs="opus"';
 
 // Matched inside the browser, so blocked requests never cost a round trip to Node.
+// Trackers and fonts only: fonts are invisible at stream quality and trackers
+// are pure overhead. Media is NOT blocked by default because these globs match
+// anywhere in the URL, so `*.mp4` also kills MSE segments like
+// `cdn.example/v/abc.mp4?bytestart=0`, breaking every video player (and audio).
 const BLOCKED_URLS = [
   '*doubleclick.net*', '*google-analytics.com*', '*googlesyndication.com*', '*googletagmanager.com*',
   '*googletagservices.com*', '*adservice.google.*', '*connect.facebook.net*', '*facebook.com/tr*',
   '*adsystem*', '*/advertising/*', '*hotjar*', '*mixpanel*', '*segment.io*', '*sentry.io*',
-  '*.woff', '*.woff2', '*.ttf', '*.otf', '*.eot',
-  '*.mp4', '*.webm', '*.ogv', '*.mp3', '*.wav', '*.m4a', '*.mov'
+  '*.woff', '*.woff2', '*.ttf', '*.otf', '*.eot'
 ];
+// Opt-in for bandwidth-starved deployments where video is not wanted.
+if (process.env.BLOCK_MEDIA === '1') BLOCKED_URLS.push('*.mp4', '*.webm', '*.ogv', '*.mp3', '*.wav', '*.m4a', '*.mov', '*.m3u8', '*.ts');
 
 const log = (message, details = '') => console.log(`[RBR] ${message}${details ? ` ${details}` : ''}`);
 const clamp = (value, min, max, fallback) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback;
 };
+
+// Chrome commits the frame to the failed URL before rejecting navigation, so
+// `page.url()` alone can't tell a real failure (cert/DNS/refused) apart from a
+// page that is just slow to finish loading. ERR_ABORTED is excluded because it
+// commonly fires for benign cases (downloads, client-side redirects).
+const isFatalNavigationError = (error) => {
+  const message = error?.message || '';
+  return /net::ERR_/.test(message) && !message.includes('ERR_ABORTED');
+};
+const NAV_ERROR_MESSAGES = {
+  ERR_CERT_COMMON_NAME_INVALID: "This site's security certificate does not match its domain name.",
+  ERR_CERT_AUTHORITY_INVALID: "This site's security certificate is not trusted.",
+  ERR_CERT_DATE_INVALID: "This site's security certificate has expired or is not yet valid.",
+  ERR_CERT_REVOKED: "This site's security certificate has been revoked.",
+  ERR_NAME_NOT_RESOLVED: 'This domain name could not be found. Check the URL for typos.',
+  ERR_CONNECTION_REFUSED: 'The server refused to connect.',
+  ERR_CONNECTION_TIMED_OUT: 'The connection to the server timed out.',
+  ERR_CONNECTION_CLOSED: 'The connection was closed before the page could load.',
+  ERR_CONNECTION_RESET: 'The connection was reset while the page was loading.',
+  ERR_INTERNET_DISCONNECTED: 'No internet connection is available.',
+  ERR_TOO_MANY_REDIRECTS: 'This page has a redirect loop.',
+  ERR_ADDRESS_UNREACHABLE: 'The server could not be reached.',
+};
+function describeNavigationError(error) {
+  const code = /ERR_[A-Z_]+/.exec(error?.message || '')?.[0];
+  return new Error(code && NAV_ERROR_MESSAGES[code] ? `${NAV_ERROR_MESSAGES[code]} (${code})` : 'The page could not be loaded.');
+}
 
 export function normalizeRemoteUrl(value) {
   const raw = String(value || '').trim();
@@ -64,7 +96,10 @@ export class StreamManager {
     ]);
     if (settings.isMobile) await page.setExtraHTTPHeaders({ 'Sec-CH-UA-Mobile': '?1', 'Sec-CH-UA-Platform': '"Android"', 'Accept-Language': 'en-US,en;q=0.9' });
 
-    await cdp.send('Network.enable', { maxTotalBufferSize: 2 * 1024 * 1024, maxResourceBufferSize: 1024 * 1024 }).catch(() => {});
+    // Network.enable is only needed for setBlockedURLs. Leave the response-body
+    // buffer at zero: we never read bodies, and a capped buffer makes DevTools
+    // start evicting/truncating large media responses under memory pressure.
+    await cdp.send('Network.enable', { maxTotalBufferSize: 0, maxResourceBufferSize: 0 }).catch(() => {});
     await cdp.send('Network.setBlockedURLs', { urls: BLOCKED_URLS }).catch(() => {});
     return cdp;
   }
@@ -193,10 +228,18 @@ export class StreamManager {
       // await page.setRequestInterception(true);
       
       send({ type: 'progress', progress: 30, message: 'Navigating to page...', subtext: 'Loading content' });
-      await Promise.race([
-        page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('The browser took too long to start.')), START_TIMEOUT_MS))
-      ]).catch((error) => { if (page.url() === 'about:blank') throw error; });
+      try {
+        await Promise.race([
+          page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('The browser took too long to start.')), START_TIMEOUT_MS))
+        ]);
+      } catch (error) {
+        // A slow-but-valid page can still miss our race timeout, so only a real
+        // network/certificate failure (or a page that never left about:blank)
+        // should abort the session.
+        if (isFatalNavigationError(error)) throw describeNavigationError(error);
+        if (page.url() === 'about:blank') throw error;
+      }
       
       const firstTab = { id: randomUUID(), page, cdp, url: page.url(), title: await page.title().catch(() => '') };
       send({ type: 'progress', progress: 95, message: 'Streaming started', subtext: 'Ready' });
@@ -311,8 +354,11 @@ export class StreamManager {
     const page = await session.browser.newPage(), cdp = await this.configurePage(page, session.settings);
     const tab = { id: randomUUID(), page, cdp, url: 'about:blank', title: 'New Tab' };
     session.tabs.set(tab.id, tab); session.activeTabId = tab.id;
-    await page.goto(normalizeRemoteUrl(rawUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {});
+    let navError = null;
+    try { await page.goto(normalizeRemoteUrl(rawUrl), { waitUntil: 'domcontentloaded', timeout: 30_000 }); }
+    catch (error) { if (isFatalNavigationError(error)) navError = describeNavigationError(error); }
     await this.sendPageInfo(session, tab); this.sendTabState(session); await this.startScreencast(session, tab);
+    if (navError) throw navError;
   }
   async switchTab(sessionId, tabId) {
     const session = this.sessions.get(sessionId), tab = session?.tabs.get(tabId);
@@ -373,14 +419,22 @@ export class StreamManager {
       }
       case 'type': if (typeof action.text === 'string' && action.text.length <= 512) tab.cdp.send('Input.insertText', { text: action.text }).catch(() => {}); break;
       case 'key': if (typeof action.key === 'string' && /^[A-Za-z0-9+_-]{1,32}$/.test(action.key)) await page.keyboard.press(action.key); break;
-      case 'navigate':
+      case 'navigate': {
+        let navError = null;
         if (action.action === 'back') await page.goBack({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
         else if (action.action === 'forward') await page.goForward({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
         else if (action.action === 'reload') await page.reload({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
-        else if (action.action === 'goto') await page.goto(normalizeRemoteUrl(action.url), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        else if (action.action === 'goto') {
+          try { await page.goto(normalizeRemoteUrl(action.url), { waitUntil: 'domcontentloaded', timeout: 30_000 }); }
+          catch (error) { if (isFatalNavigationError(error)) navError = describeNavigationError(error); }
+        }
         else throw new Error('Unsupported navigation.');
+        // Sync tab/url state even on failure - Chrome still commits to the failed
+        // URL (showing its own error interstitial), so the UI must reflect that.
         await this.sendPageInfo(session, tab); this.sendTabState(session);
+        if (navError) throw navError;
         break;
+      }
       default: throw new Error('Unsupported interaction.');
     }
   }
