@@ -151,6 +151,7 @@ export class StreamManager {
 
   async startScreencast(session, tab) {
     await session.stopScreencast?.();
+    if (session.screencastSuspended) return;
     let lastSentAt = 0, framesSent = 0, framesDropped = 0, ackTimer = null, ackAt = 0, encodeEma = 0;
     let quality = session.settings.quality, scale = 1, minFrameInterval = MIN_FRAME_INTERVAL;
     const applyCaptureSettings = () => tab.cdp.send('Page.startScreencast', {
@@ -158,7 +159,13 @@ export class StreamManager {
       quality,
       maxWidth: Math.round(session.settings.width * session.settings.renderScale * scale),
       maxHeight: Math.round(session.settings.height * session.settings.renderScale * scale),
-      everyNthFrame: 1
+      everyNthFrame: 1,
+      // The CDP default permits three frames to wait for acknowledgement. That
+      // silently turns a slow client into a multi-frame latency queue. One
+      // in-flight frame plus Chrome's newest-frame replacement keeps the stream
+      // live rather than faithfully delivering stale images.
+      maxFramesInFlight: 1,
+      sendLastFrame: true
     });
     
     const onFrame = ({ data, metadata, sessionId: frameId }) => {
@@ -295,6 +302,7 @@ export class StreamManager {
         frameNumber: 0, 
         pendingScroll: 0, 
         scrollScheduled: false,
+        screencastSuspended: false,
         audioEnabled: Boolean(options.enableAudio),
         stop: async () => { 
           await session.stopScreencast?.(); 
@@ -409,6 +417,21 @@ export class StreamManager {
     session.audioEnabled = enabled;
     if (enabled) await this.startAudioCapture(session);
     else await session.stopAudio?.();
+  }
+
+  async setClientVisible(sessionId, visible) {
+    const session = this.sessions.get(sessionId); if (!session) throw new Error('Unknown stream session.');
+    const shouldSuspend = !visible;
+    if (session.screencastSuspended === shouldSuspend) return;
+    session.screencastSuspended = shouldSuspend;
+    if (shouldSuspend) {
+      await session.stopScreencast?.();
+      log('video capture paused', `session=${session.id.slice(0, 8)}`);
+      return;
+    }
+    const tab = session.tabs.get(session.activeTabId);
+    if (tab) await this.startScreencast(session, tab);
+    log('video capture resumed', `session=${session.id.slice(0, 8)}`);
   }
 
   updateStream(sessionId, changes = {}) {

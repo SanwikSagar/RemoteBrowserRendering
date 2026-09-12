@@ -3,7 +3,7 @@ const AUDIO_MIME_TYPE = 'audio/webm; codecs="opus"';
 class RemoteBrowserClient {
   constructor() {
     this.debug = new URLSearchParams(location.search).has('debug') || localStorage.getItem('remote-browser-debug') === '1';
-    this.ws = null; this.sessionId = null; this.isStreaming = false;
+    this.ws = null; this.sessionId = null; this.isStreaming = false; this.clientVisible = document.visibilityState !== 'hidden';
     this.frameCount = 0; this.fpsCounter = 0; this.lastFpsUpdate = performance.now();
     this.reconnectAttempts = 0; this.maxReconnectAttempts = Infinity; this.connectionRetryTimeout = null;
     // Ultra-optimized frame handling
@@ -13,8 +13,7 @@ class RemoteBrowserClient {
     this.startTimeout = null; this.firstFrameTimeout = null;
     this.pendingScroll = 0; this.scrollScheduled = false; this.touchState = null; this.suppressClickUntil = 0;
     this.streamVersion = 0;
-    // Aggressive performance optimization
-    this.droppedFrames = 0; this.lastFrameTime = 0; this.targetFrameTime = 1000 / 30; // 30 FPS target
+    this.droppedFrames = 0;
     // Audio streaming: an MSE-backed <audio> element fed by Opus/WebM chunks
     this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = [];
     this.tabs = []; this.activeTabId = null;
@@ -126,6 +125,17 @@ class RemoteBrowserClient {
     document.addEventListener('fullscreenchange', () => {
       if (!document.fullscreenElement) this.elements.browserWindow.classList.remove('focus-mode');
     });
+    document.addEventListener('visibilitychange', () => this.handleVisibilityChange());
+  }
+  handleVisibilityChange() {
+    this.clientVisible = document.visibilityState !== 'hidden';
+    if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'visibility', sessionId: this.sessionId, visible: this.clientVisible }));
+    }
+    if (this.clientVisible && this.latestFrame && !this.decodeInFlight && !this.renderScheduled) {
+      this.renderScheduled = true;
+      requestAnimationFrame(() => this.renderLatestFrame());
+    }
   }
   toggleSettings() {
     if (this.elements.settingsMenu.classList.contains('active')) return this.hideSettings();
@@ -205,13 +215,11 @@ class RemoteBrowserClient {
     this.pendingScroll += deltaY;
     if (this.scrollScheduled) return;
     this.scrollScheduled = true;
-    // Batch over 2 rAF ticks (~32ms) to merge more scroll events into one
-    // WebSocket message, reducing message rate by ~50% during fast scrolling.
+    // One animation frame merges bursty wheel/touch updates without adding the
+    // extra ~16ms delay that made mobile scrolling feel detached.
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        this.sendInteraction({ type: 'scroll', deltaY: Math.round(Math.max(-2_000, Math.min(2_000, this.pendingScroll))) });
-        this.pendingScroll = 0; this.scrollScheduled = false;
-      });
+      this.sendInteraction({ type: 'scroll', deltaY: Math.round(Math.max(-2_000, Math.min(2_000, this.pendingScroll))) });
+      this.pendingScroll = 0; this.scrollScheduled = false;
     });
   }
   handlePointerDown(event) {
@@ -283,6 +291,7 @@ class RemoteBrowserClient {
     if (data.type === 'started') {
       this.log('stream started', data.sessionId);
       this.sessionId = data.sessionId; this.isStreaming = true; clearTimeout(this.startTimeout); this.enableNavigation(true); this.elements.startStreamOption.style.display = 'none'; this.elements.stopStreamOption.style.display = 'flex'; this.updateStatus('streaming', 'Streaming');
+      if (!this.clientVisible && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'visibility', sessionId: this.sessionId, visible: false }));
       clearTimeout(this.firstFrameTimeout);
       this.firstFrameTimeout = setTimeout(() => { if (this.isStreaming && this.frameCount === 0) this.showNotification('The server is connected but has not produced a frame. Retrying capture…', 'warning'); }, 12_000);
     }
@@ -394,20 +403,16 @@ class RemoteBrowserClient {
     if (format !== 1 && format !== 2) return;
     const mimeType = format === 2 ? 'image/jpeg' : 'image/webp';
     
-    const now = performance.now();
-    
     // The server already paces to the target frame rate, so every delivered frame
     // is worth keeping; the newest simply supersedes an undrawn one.
     if (this.latestFrame) { this.latestFrame.bytes = null; this.droppedFrames++; }
     
-    // Store new frame
-    // Slice creates an owned copy of just the JPEG payload; the original ArrayBuffer
-    // can then be GC'd immediately instead of being pinned by the Uint8Array view.
-    this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer.slice(17)), receivedAt: now };
-    this.lastFrameTime = now;
+    // WebSocket message buffers are immutable and exclusive to this message.
+    // Keeping a view avoids copying every JPEG before the decoder has even seen it.
+    this.latestFrame = { timestamp: view.getFloat64(5), mimeType, bytes: new Uint8Array(buffer, 17) };
     
     // Immediate scheduling for lowest latency
-    if (!this.decodeInFlight && !this.renderScheduled) { 
+    if (this.clientVisible && !this.decodeInFlight && !this.renderScheduled) {
       this.renderScheduled = true; 
       requestAnimationFrame(() => this.renderLatestFrame()); 
     }
@@ -415,7 +420,34 @@ class RemoteBrowserClient {
   ensureContext() {
     if (this.streamContext) return true;
     this.streamContext = this.elements.stream.getContext('2d', { alpha: false, desynchronized: true, willReadFrequently: false });
+    if (this.streamContext) {
+      this.streamContext.imageSmoothingEnabled = true;
+      this.streamContext.imageSmoothingQuality = 'high';
+      this.streamContext.globalCompositeOperation = 'copy';
+    }
     return Boolean(this.streamContext);
+  }
+  resizeOutputSurface() {
+    if (!this.ensureContext()) return false;
+    const canvas = this.elements.stream, rect = canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return false;
+    // Render the upscaled result at the client display density instead of
+    // relying on a second, lower-quality CSS stretch of the small source frame.
+    // The cap keeps the local surface light enough for mid-range phones.
+    const density = Math.min(window.devicePixelRatio || 1, 2);
+    const pixelBudget = this.isMobile ? 1_152_000 : 2_073_600;
+    let width = Math.max(1, Math.round(rect.width * density));
+    let height = Math.max(1, Math.round(rect.height * density));
+    const scale = Math.min(1, Math.sqrt(pixelBudget / (width * height)));
+    width = Math.max(1, Math.round(width * scale));
+    height = Math.max(1, Math.round(height * scale));
+    if (canvas.width === width && canvas.height === height) return true;
+    canvas.width = width; canvas.height = height;
+    // Resizing a canvas resets its drawing state.
+    this.streamContext.imageSmoothingEnabled = true;
+    this.streamContext.imageSmoothingQuality = 'high';
+    this.streamContext.globalCompositeOperation = 'copy';
+    return true;
   }
   async decodeFrame(frame) {
     if (this.webCodecsAvailable) {
@@ -451,7 +483,7 @@ class RemoteBrowserClient {
   }
   async renderLatestFrame() {
     this.renderScheduled = false; 
-    if (this.decodeInFlight || !this.latestFrame) return;
+    if (this.decodeInFlight || !this.latestFrame || !this.clientVisible) return;
     
     const frame = this.latestFrame; 
     this.latestFrame = null;
@@ -461,13 +493,13 @@ class RemoteBrowserClient {
     try {
       const decoded = await this.decodeFrame(frame);
       
-      if (version === this.streamVersion && this.ensureContext()) {
-        this.elements.stream.classList.add('active');
+      if (version === this.streamVersion) this.elements.stream.classList.add('active');
+      if (version === this.streamVersion && this.resizeOutputSurface()) {
         const canvas = this.elements.stream;
         const source = decoded.source;
-        const width = source.displayWidth || source.width, height = source.displayHeight || source.height;
-        if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
-        this.streamContext.drawImage(source, 0, 0);
+        // High-quality canvas filtering performs the one required client-side
+        // scale in the persistent output surface, which fills the viewport.
+        this.streamContext.drawImage(source, 0, 0, canvas.width, canvas.height);
         this.recordFrame(frame.timestamp);
       }
       
@@ -477,15 +509,12 @@ class RemoteBrowserClient {
       if (this.debug) this.log('frame decode failed', error.message);
     } finally {
       this.decodeInFlight = false;
-      // Immediately start decoding the next frame if one arrived during decode.
-      // Using queueMicrotask instead of rAF eliminates the ~16ms vsync wait,
-      // keeping the decode pipeline saturated at all times.
+      // Present at the display cadence. Decoding and painting several frames in
+      // one turn cannot improve what the user sees; it only competes with input,
+      // scrolling and the compositor. The latest pending frame still wins.
       if (this.latestFrame && !this.renderScheduled) {
         this.renderScheduled = true;
-        queueMicrotask(() => {
-          this.renderScheduled = false;
-          this.renderLatestFrame();
-        });
+        requestAnimationFrame(() => this.renderLatestFrame());
       }
     }
   }
@@ -510,7 +539,12 @@ class RemoteBrowserClient {
     this.cleanupFrames();
     this.teardownAudio();
     this.decodeInFlight = false; this.enableNavigation(false); this.elements.stream.classList.remove('active');
-    if (this.streamContext) this.streamContext.clearRect(0, 0, this.elements.stream.width, this.elements.stream.height);
+    if (this.streamContext) {
+      // Resetting dimensions releases the backing surface instead of keeping a
+      // large GPU/CPU allocation alive while the stream is stopped.
+      this.elements.stream.width = 1; this.elements.stream.height = 1;
+      this.streamContext = null;
+    }
     this.elements.placeholder.style.display = 'block'; this.hideLoadingSpinner();
     this.elements.startStreamOption.style.display = 'flex'; this.elements.stopStreamOption.style.display = 'none'; this.updateStatus('connected', 'Connected');
   }

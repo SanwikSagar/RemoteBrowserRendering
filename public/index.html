@@ -524,14 +524,12 @@
             touch-action: none;
             display: none;
             background: #ffffff;
-            /* Hardware-accelerated upscaling with crisp rendering */
-            transform: translateZ(0);
-            will-change: contents;
+            /* The canvas contains the high-density client-side upscale. Paint
+               containment prevents each frame from invalidating the UI chrome. */
+            contain: paint;
             image-rendering: auto;
             backface-visibility: hidden;
             -webkit-backface-visibility: hidden;
-            /* Layout isolation: the canvas never affects outside layout */
-            contain: strict;
             outline: none;
         }
 
@@ -1016,6 +1014,6 @@
         </div>
     </div>
 
-    <script src="browser.js?v=20260911.6"></script>
+    <script src="browser.js?v=20260912.3"></script>
 </body>
 </html>

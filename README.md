@@ -100,6 +100,7 @@ are coalesced server-side and flushed once per tick as a single wheel event.
 { "type": "stop", "sessionId": "…" }
 { "type": "update", "sessionId": "…", "quality": 70 }
 { "type": "audio", "sessionId": "…", "enabled": true }
+{ "type": "visibility", "sessionId": "…", "visible": false }
 { "type": "tab", "sessionId": "…", "action": "create" | "switch" | "close", "url": "…", "tabId": "…" }
 { "type": "interact", "sessionId": "…", "action": { "type": "click" | "scroll" | "type" | "key" | "navigate", "...": "…" } }
 ```

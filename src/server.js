@@ -148,6 +148,8 @@ wss.on('connection', (ws) => {
         streamManager.updateStream(sessionId, data);
       } else if (data.type === 'audio' && data.sessionId === sessionId) {
         await streamManager.setAudioEnabled(sessionId, Boolean(data.enabled));
+      } else if (data.type === 'visibility' && data.sessionId === sessionId) {
+        await streamManager.setClientVisible(sessionId, Boolean(data.visible));
       } else if (data.type === 'tab' && data.sessionId === sessionId) {
         if (data.action === 'create') await streamManager.createTab(sessionId, data.url);
         else if (data.action === 'switch') await streamManager.switchTab(sessionId, data.tabId);
