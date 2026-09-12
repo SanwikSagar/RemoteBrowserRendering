@@ -1,11 +1,11 @@
 import { randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 
-const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 192 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 30;
+const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 96 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 24;
 // Half a vCPU can encode roughly this many pixels per frame at the target rate.
 // Capture is scaled to fit the budget, then quality adapts around it.
-const PIXEL_BUDGET = 620_000, MIN_QUALITY = 30, MAX_QUALITY = 85, DEFAULT_QUALITY = 60, TUNE_INTERVAL_MS = 1_000;
-// Adaptive frame pacing: 30fps down to 12fps, then capture downscale to 60%.
+const PIXEL_BUDGET = 460_000, MIN_QUALITY = 28, MAX_QUALITY = 78, DEFAULT_QUALITY = 54, TUNE_INTERVAL_MS = 1_000;
+// Adaptive frame pacing: a stable 24fps down to 12fps, then capture downscale.
 const MIN_FRAME_INTERVAL = Math.floor(1000 / STREAM_FPS), MAX_FRAME_INTERVAL = Math.floor(1000 / 12), MIN_SCALE = 0.5;
 const DEBUG = process.env.DEBUG_STREAM === '1';
 
@@ -13,7 +13,7 @@ const DEBUG = process.env.DEBUG_STREAM === '1';
 // sink's monitor source and re-encodes it to Opus for the WebSocket.
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
 const AUDIO_SOURCE = process.env.PULSE_AUDIO_SOURCE || 'virtual_speaker.monitor';
-const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '32k';
+const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '28k';
 const AUDIO_MIME_TYPE = 'audio/webm; codecs="opus"';
 
 // Matched inside the browser, so blocked requests never cost a round trip to Node.
@@ -221,7 +221,9 @@ export class StreamManager {
     // real fixes are a lower frame rate, then fewer pixels - in that order, since
     // a steady 15fps reads better than a smeared 30fps.
     const tuneTimer = setInterval(() => {
-      const congested = (session.ws?.bufferedAmount || 0) > MAX_BUFFERED_BYTES / 2;
+      const buffered = session.ws?.bufferedAmount || 0;
+      const congested = buffered > MAX_BUFFERED_BYTES * 0.35;
+      const heavilyCongested = buffered > MAX_BUFFERED_BYTES * 0.75;
       const prevQuality = quality, prevScale = scale;
       if (encodeEma) {
         const overloaded = encodeEma > minFrameInterval * 1.25, relaxed = encodeEma < minFrameInterval * 0.5;
@@ -232,8 +234,9 @@ export class StreamManager {
           if (scale < 1) scale = Math.min(1, Math.round((scale + 0.1) * 10) / 10);
           else if (minFrameInterval > MIN_FRAME_INTERVAL) minFrameInterval = Math.max(MIN_FRAME_INTERVAL, Math.round(minFrameInterval / 1.25));
         }
-        if (congested) quality = Math.max(MIN_QUALITY, quality - 6);
-        else if (!overloaded) quality = Math.min(session.settings.quality, quality + 5);
+        if (heavilyCongested) quality = Math.max(MIN_QUALITY, quality - 8);
+        else if (congested) quality = Math.max(MIN_QUALITY, quality - 5);
+        else if (!overloaded) quality = Math.min(session.settings.quality, quality + 4);
       }
       if (DEBUG) {
         const total = framesSent + framesDropped;
@@ -369,6 +372,12 @@ export class StreamManager {
     session.audioProcess = proc;
     const generation = (session.audioGeneration = (session.audioGeneration || 0) + 1);
     let initSent = false, stderrTail = '';
+    const initTimer = setTimeout(() => {
+      if (initSent || session.audioProcess !== proc) return;
+      session.audioProcess = null;
+      proc.kill('SIGTERM');
+      this.failAudio(session, 'Audio capture started but produced no WebM data. Check PulseAudio and ffmpeg logs.');
+    }, 8_000);
     
     proc.stdout.on('data', (chunk) => {
       if (session.ws?.readyState !== session.ws?.OPEN) return;
@@ -377,7 +386,9 @@ export class StreamManager {
       // capture path observes bufferedAmount and yields frames first.
       if (!initSent) {
         initSent = true;
+        clearTimeout(initTimer);
         this.sendJson(session, { type: 'audioInit', mimeType: AUDIO_MIME_TYPE, generation });
+        log('audio stream ready', `session=${session.id.slice(0, 8)} generation=${generation}`);
       }
       // Format byte 3 + timestamp + generation distinguishes a fresh muxer
       // stream after recovery from old bytes still draining through the socket.
@@ -394,6 +405,7 @@ export class StreamManager {
       if (DEBUG) log('ffmpeg audio', text.trim());
     });
     proc.once('error', (error) => {
+      clearTimeout(initTimer);
       if (session.audioProcess === proc) session.audioProcess = null;
       const reason = error.code === 'ENOENT'
         ? 'ffmpeg is not installed on the server. Deploy with the Docker image to enable audio.'
@@ -401,6 +413,7 @@ export class StreamManager {
       this.failAudio(session, reason);
     });
     proc.once('exit', (code, signal) => {
+      clearTimeout(initTimer);
       // stopAudio clears audioProcess first, so a still-set reference means ffmpeg
       // died on its own (missing PulseAudio sink, no libopus, etc.).
       if (session.audioProcess !== proc) return;
@@ -412,6 +425,7 @@ export class StreamManager {
     session.stopAudio = async () => {
       if (session.audioProcess !== proc) return;
       session.audioProcess = null;
+      clearTimeout(initTimer);
       proc.stdout.removeAllListeners('data');
       proc.kill('SIGTERM');
     };

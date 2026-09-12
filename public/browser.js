@@ -15,7 +15,7 @@ class RemoteBrowserClient {
     this.streamVersion = 0;
     this.droppedFrames = 0;
     // Audio streaming: an MSE-backed <audio> element fed by Opus/WebM chunks
-    this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = []; this.audioQueueBytes = 0; this.audioGeneration = null; this.minimumAudioGeneration = 0; this.audioRecovering = false;
+    this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = []; this.audioQueueBytes = 0; this.audioGeneration = null; this.minimumAudioGeneration = 0; this.audioRecovering = false; this.audioProtocol = 'generation'; this.audioStartTimeout = null;
     this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn','audioBtn','audioIcon','audioPlayer'].map((id) => [id, document.getElementById(id)]));
@@ -52,22 +52,22 @@ class RemoteBrowserClient {
       const preferences = JSON.parse(localStorage.getItem('remote-browser-preferences') || '{}');
       // Quality is now a ceiling the server adapts under, so the stored profile
       // from the old fixed-quality build has to be discarded.
-      if (localStorage.getItem('remote-browser-stream-profile') !== 'adaptive-30fps-v3') {
-        this.elements.fpsInput.value = 30; 
-        this.elements.qualityInput.value = 60;
-        localStorage.setItem('remote-browser-stream-profile', 'adaptive-30fps-v3');
+      if (localStorage.getItem('remote-browser-stream-profile') !== 'stable-24fps-v5') {
+        this.elements.fpsInput.value = 24;
+        this.elements.qualityInput.value = 54;
+        localStorage.setItem('remote-browser-stream-profile', 'stable-24fps-v5');
       } else {
         if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
       }
-      this.elements.fpsInput.value = 30; // Fixed at 30 FPS
+      this.elements.fpsInput.value = 24; // Fixed stable frame cadence
       if (preferences.url) this.elements.urlInput.value = preferences.url;
     } catch { /* Invalid local storage should never block the browser. */ }
   }
   savePreferences() {
     localStorage.setItem('remote-browser-preferences', JSON.stringify({ fps: this.fps(), quality: this.quality(), url: this.elements.urlInput.value }));
   }
-  fps() { this.elements.fpsInput.value = 30; return 30; }
-  quality() { return this.clampInput(this.elements.qualityInput, 30, 85, 60); }
+  fps() { this.elements.fpsInput.value = 24; return 24; }
+  quality() { return this.clampInput(this.elements.qualityInput, 28, 78, 54); }
   clampInput(input, min, max, fallback) {
     const value = Number.parseInt(input.value, 10); input.value = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; return Number(input.value);
   }
@@ -339,6 +339,13 @@ class RemoteBrowserClient {
     // while a user gesture is active, and the server's first chunk arrives later.
     this.setupAudio(AUDIO_MIME_TYPE);
     this.sendAudioCommand(true);
+    this.armAudioStartTimeout();
+  }
+  armAudioStartTimeout() {
+    clearTimeout(this.audioStartTimeout);
+    this.audioStartTimeout = setTimeout(() => {
+      if (this.audioEnabled && this.audioGeneration === null) this.showNotification('Audio capture has not started. Check the server audio logs.', 'warning');
+    }, 8_000);
   }
   sendAudioCommand(enabled) {
     if (this.sessionId && this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: 'audio', sessionId: this.sessionId, enabled }));
@@ -363,19 +370,27 @@ class RemoteBrowserClient {
     player.play().catch((error) => { if (this.debug) this.log('audio play blocked', error.message); });
   }
   handleAudioInit(data) {
-    const generation = Number(data.generation);
-    if (!Number.isSafeInteger(generation) || generation < this.minimumAudioGeneration) return;
+    // Servers before the generation protocol used a 9-byte audio header. Keep
+    // them working during a rolling deployment instead of silently dropping all
+    // sound until both sides happen to update at the same moment.
+    const hasGeneration = Number.isSafeInteger(Number(data.generation));
+    const generation = hasGeneration ? Number(data.generation) : 0;
+    this.audioProtocol = hasGeneration ? 'generation' : 'legacy';
+    if (generation < this.minimumAudioGeneration) return;
     if (this.audioGeneration !== null && generation !== this.audioGeneration) this.teardownAudio(false);
     this.audioGeneration = generation; this.minimumAudioGeneration = generation;
     this.audioRecovering = false;
+    clearTimeout(this.audioStartTimeout);
+    this.log('audio stream ready', `${this.audioProtocol} generation=${generation}`);
     this.setupAudio(data.mimeType || AUDIO_MIME_TYPE);
   }
   receiveAudioChunk(buffer) {
-    if (!this.audioEnabled || buffer.byteLength < 14) return;
-    const generation = new DataView(buffer).getUint32(9);
+    const isGenerated = this.audioProtocol === 'generation';
+    if (!this.audioEnabled || buffer.byteLength < (isGenerated ? 14 : 10)) return;
+    const generation = isGenerated ? new DataView(buffer).getUint32(9) : 0;
     if (generation !== this.audioGeneration) return;
     if (!this.mediaSource) this.setupAudio(AUDIO_MIME_TYPE);
-    const chunk = buffer.slice(13);
+    const chunk = buffer.slice(isGenerated ? 13 : 9);
     this.audioQueue.push(chunk); this.audioQueueBytes += chunk.byteLength;
     // Never discard a fragment from a continuous WebM stream. If local MSE is
     // genuinely stalled, reset both ends onto a new, independently initialized
@@ -416,15 +431,17 @@ class RemoteBrowserClient {
   recoverAudio() {
     if (this.audioRecovering || !this.audioEnabled) return;
     this.audioRecovering = true;
-    this.minimumAudioGeneration = (this.audioGeneration || 0) + 1;
+    this.minimumAudioGeneration = this.audioProtocol === 'generation' ? (this.audioGeneration || 0) + 1 : 0;
     this.teardownAudio(false); this.sendAudioCommand(false);
     setTimeout(() => {
       if (!this.audioEnabled) return;
+      this.armAudioStartTimeout();
       this.sendAudioCommand(true);
     }, 150);
   }
   teardownAudio(resetGeneration = true) {
     this.audioQueue = []; this.audioQueueBytes = 0; this.sourceBuffer = null;
+    clearTimeout(this.audioStartTimeout);
     const player = this.elements.audioPlayer;
     player.pause(); player.removeAttribute('src'); player.load();
     if (this.mediaSourceUrl) { URL.revokeObjectURL(this.mediaSourceUrl); this.mediaSourceUrl = null; }
@@ -469,7 +486,9 @@ class RemoteBrowserClient {
     // relying on a second, lower-quality CSS stretch of the small source frame.
     // The cap keeps the local surface light enough for mid-range phones.
     const density = Math.min(window.devicePixelRatio || 1, 2);
-    const pixelBudget = this.isMobile ? 1_152_000 : 2_073_600;
+    // Keep the final upscale detailed without making the client render more
+    // pixels than a 24fps stream can present smoothly.
+    const pixelBudget = this.isMobile ? 829_440 : 1_350_000;
     let width = Math.max(1, Math.round(rect.width * density));
     let height = Math.max(1, Math.round(rect.height * density));
     const scale = Math.min(1, Math.sqrt(pixelBudget / (width * height)));

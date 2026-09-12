@@ -156,7 +156,7 @@ DEBUG_STREAM=1                  # Verbose screencast/audio/command logging
 BLOCK_MEDIA=1                   # Opt-in: block video/audio files to save bandwidth (breaks players)
 FFMPEG_PATH=ffmpeg              # Override if ffmpeg isn't on PATH
 PULSE_AUDIO_SOURCE=virtual_speaker.monitor
-AUDIO_BITRATE=32k
+AUDIO_BITRATE=28k
 ```
 
 ## Browser support
