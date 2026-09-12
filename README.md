@@ -9,10 +9,9 @@ interactions relayed back to the page.
 - **Binary frame protocol** — a small fixed header (format, frame number,
   timestamp, width, height) followed by the raw JPEG payload; no Base64, no
   per-message JSON overhead.
-- **Adaptive quality** — capture resolution is scaled to a fixed pixel budget
-  and JPEG quality is tuned every 2s from measured Chrome encode latency, so a
-  small server (e.g. Render's free 0.5 vCPU / 512MB plan) stays at target FPS
-  instead of falling behind.
+- **Adaptive quality** — capture resolution and JPEG quality adapt from measured
+  Chrome encode and WebSocket pressure while capture pacing remains targeted at
+  24 FPS; the client always presents only the newest frame.
 - **Real audio** — Chrome renders into a virtual PulseAudio sink; ffmpeg reads
   its monitor source, encodes to Opus/WebM, and the client plays it back via
   MediaSource. This is whole-browser audio (all tabs mixed), not per-tab.
@@ -67,8 +66,8 @@ process for audio.
    fallback, and draws 1:1 into a canvas sized to the decoded frame; CSS scales
    the canvas up, so the GPU compositor does the upscaling instead of the CPU.
 
-A background timer re-measures Chrome's ack→delivery latency and nudges JPEG
-quality up or down every 2 seconds, within `[MIN_QUALITY, MAX_QUALITY]`.
+A background timer re-measures Chrome's ack→delivery latency and delivered FPS,
+then lowers capture pixels and JPEG quality before allowing latency to build.
 
 ### Audio pipeline
 
@@ -156,7 +155,7 @@ DEBUG_STREAM=1                  # Verbose screencast/audio/command logging
 BLOCK_MEDIA=1                   # Opt-in: block video/audio files to save bandwidth (breaks players)
 FFMPEG_PATH=ffmpeg              # Override if ffmpeg isn't on PATH
 PULSE_AUDIO_SOURCE=virtual_speaker.monitor
-AUDIO_BITRATE=28k
+AUDIO_BITRATE=32k                # Mono Opus; lower to 28k for a smaller stream
 ```
 
 ## Browser support

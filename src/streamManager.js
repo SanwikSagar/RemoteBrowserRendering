@@ -5,15 +5,16 @@ const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 96 * 1024, START
 // Half a vCPU can encode roughly this many pixels per frame at the target rate.
 // Capture is scaled to fit the budget, then quality adapts around it.
 const PIXEL_BUDGET = 460_000, MIN_QUALITY = 28, MAX_QUALITY = 78, DEFAULT_QUALITY = 54, TUNE_INTERVAL_MS = 1_000;
-// Adaptive frame pacing: a stable 24fps down to 12fps, then capture downscale.
-const MIN_FRAME_INTERVAL = Math.floor(1000 / STREAM_FPS), MAX_FRAME_INTERVAL = Math.floor(1000 / 12), MIN_SCALE = 0.5;
+// Capture pacing is fixed at the advertised rate. Under load we shed pixels and
+// JPEG detail instead of quietly turning a 24fps stream into a 12fps stream.
+const MIN_FRAME_INTERVAL = Math.floor(1000 / STREAM_FPS), MIN_SCALE = 0.4;
 const DEBUG = process.env.DEBUG_STREAM === '1';
 
 // Chrome mixes every tab's output into one PulseAudio sink; ffmpeg reads that
 // sink's monitor source and re-encodes it to Opus for the WebSocket.
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
 const AUDIO_SOURCE = process.env.PULSE_AUDIO_SOURCE || 'virtual_speaker.monitor';
-const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '28k';
+const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '32k';
 const AUDIO_MIME_TYPE = 'audio/webm; codecs="opus"';
 
 // Matched inside the browser, so blocked requests never cost a round trip to Node.
@@ -216,31 +217,36 @@ export class StreamManager {
     tab.cdp.on('Page.screencastFrame', onFrame);
     await applyCaptureSettings();
     
-    // JPEG encode cost is per pixel, so quality barely moves CPU load; it is a
-    // bandwidth lever only. When Chrome cannot deliver frames within budget the
-    // real fixes are a lower frame rate, then fewer pixels - in that order, since
-    // a steady 15fps reads better than a smeared 30fps.
+    // JPEG encode cost is per pixel, so a lower frame rate does not help
+    // responsiveness. Keep the 24fps capture cadence and shed pixels first;
+    // the client will upscale the newest frame without accumulating latency.
     const tuneTimer = setInterval(() => {
       const buffered = session.ws?.bufferedAmount || 0;
       const congested = buffered > MAX_BUFFERED_BYTES * 0.35;
       const heavilyCongested = buffered > MAX_BUFFERED_BYTES * 0.75;
       const prevQuality = quality, prevScale = scale;
+      const sentFps = framesSent * 1000 / TUNE_INTERVAL_MS;
+      const frameDemand = framesSent + framesDropped;
+      // Ignore still pages (which naturally repaint infrequently). A dynamic
+      // page that produced at least ~18 capture opportunities but delivered
+      // fewer than that is genuinely under the target and needs less work.
+      const underDelivering = frameDemand >= STREAM_FPS * 0.75 && sentFps < STREAM_FPS * 0.75;
       if (encodeEma) {
-        const overloaded = encodeEma > minFrameInterval * 1.25, relaxed = encodeEma < minFrameInterval * 0.5;
+        const overloaded = encodeEma > MIN_FRAME_INTERVAL * 1.15 || underDelivering;
+        const relaxed = encodeEma < MIN_FRAME_INTERVAL * 0.55 && !congested && !underDelivering;
         if (overloaded) {
-          if (minFrameInterval < MAX_FRAME_INTERVAL) minFrameInterval = Math.min(MAX_FRAME_INTERVAL, Math.round(minFrameInterval * 1.25));
-          else scale = Math.max(MIN_SCALE, Math.round((scale - 0.1) * 10) / 10);
+          scale = Math.max(MIN_SCALE, Math.round((scale - (heavilyCongested ? 0.15 : 0.1)) * 20) / 20);
         } else if (relaxed) {
-          if (scale < 1) scale = Math.min(1, Math.round((scale + 0.1) * 10) / 10);
-          else if (minFrameInterval > MIN_FRAME_INTERVAL) minFrameInterval = Math.max(MIN_FRAME_INTERVAL, Math.round(minFrameInterval / 1.25));
+          scale = Math.min(1, Math.round((scale + 0.05) * 20) / 20);
         }
         if (heavilyCongested) quality = Math.max(MIN_QUALITY, quality - 8);
         else if (congested) quality = Math.max(MIN_QUALITY, quality - 5);
-        else if (!overloaded) quality = Math.min(session.settings.quality, quality + 4);
+        else if (overloaded) quality = Math.max(MIN_QUALITY, quality - 3);
+        else quality = Math.min(session.settings.quality, quality + 2);
       }
       if (DEBUG) {
         const total = framesSent + framesDropped;
-        log('screencast stats', `session=${session.id.slice(0, 8)} fps=${Math.round(framesSent / (TUNE_INTERVAL_MS / 1000))} target=${Math.round(1000 / minFrameInterval)} dropped=${total ? Math.round((framesDropped / total) * 100) : 0}% encode=${Math.round(encodeEma)}ms q=${quality} scale=${scale}`);
+        log('screencast stats', `session=${session.id.slice(0, 8)} fps=${Math.round(sentFps)} target=${STREAM_FPS} dropped=${total ? Math.round((framesDropped / total) * 100) : 0}% encode=${Math.round(encodeEma)}ms q=${quality} scale=${scale}`);
       }
       framesSent = 0; framesDropped = 0;
       if (quality !== prevQuality || scale !== prevScale) applyCaptureSettings().catch(() => {});
@@ -359,9 +365,11 @@ export class StreamManager {
       // 1920 bytes = 20ms of 48kHz mono s16, matching one Opus frame exactly.
       '-f', 'pulse', '-fragment_size', '1920', '-i', AUDIO_SOURCE,
       '-ac', '1', '-ar', '48000', '-vn',
-      // compression_level 3 is ~1/3 the CPU of the default 10 for speech/music
-      // at this bitrate; the sink is already mono 48k so no resampling happens.
-      '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-compression_level', '0', '-application', 'lowdelay', '-frame_duration', '20',
+      // Complexity 4 remains light while noticeably improving music over the
+      // lowest-complexity encoder; the sink is already mono 48k.
+      // Constrained VBR keeps bandwidth predictable while the modest encoder
+      // complexity improves music clarity without competing with Chromium.
+      '-c:a', 'libopus', '-b:a', AUDIO_BITRATE, '-vbr', 'constrained', '-compression_level', '4', '-application', 'lowdelay', '-frame_duration', '20', '-fec', '1', '-packet_loss', '1',
       // ~60ms live clusters keep MSE latency minimal; each one is an independent append.
       '-f', 'webm', '-live', '1', '-dash', '1', '-cluster_size_limit', '16K', '-cluster_time_limit', '60',
       '-flush_packets', '1', 'pipe:1'

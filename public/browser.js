@@ -9,17 +9,18 @@ class RemoteBrowserClient {
     // Ultra-optimized frame handling
     this.latestFrame = null; this.renderScheduled = false; this.decodeInFlight = false; 
     this.streamContext = null; 
+    this.outputSurfaceRect = null; this.outputSurfaceDirty = true; this.outputSurfaceObserver = null;
     this.webCodecsAvailable = typeof ImageDecoder === 'function'; 
     this.startTimeout = null; this.firstFrameTimeout = null;
     this.pendingScroll = 0; this.scrollScheduled = false; this.touchState = null; this.suppressClickUntil = 0;
     this.streamVersion = 0;
     this.droppedFrames = 0;
     // Audio streaming: an MSE-backed <audio> element fed by Opus/WebM chunks
-    this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = []; this.audioQueueBytes = 0; this.audioGeneration = null; this.minimumAudioGeneration = 0; this.audioRecovering = false; this.audioProtocol = 'generation'; this.audioStartTimeout = null;
+    this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = []; this.audioQueueBytes = 0; this.audioGeneration = null; this.minimumAudioGeneration = 0; this.audioRecovering = false; this.audioProtocol = 'generation'; this.audioStartTimeout = null; this.audioPrimed = false;
     this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn','audioBtn','audioIcon','audioPlayer'].map((id) => [id, document.getElementById(id)]));
-    this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport();
+    this.restorePreferences(); this.setupEventListeners(); this.setupResponsiveViewport(); this.setupOutputSurface();
     this.log('client initialized', `viewport=${this.viewportWidth}x${this.viewportHeight} mobile=${this.isMobile}`); this.showConnectionOverlay('Connecting to server...', 'Establishing WebSocket connection'); this.connect();
   }
 
@@ -52,10 +53,10 @@ class RemoteBrowserClient {
       const preferences = JSON.parse(localStorage.getItem('remote-browser-preferences') || '{}');
       // Quality is now a ceiling the server adapts under, so the stored profile
       // from the old fixed-quality build has to be discarded.
-      if (localStorage.getItem('remote-browser-stream-profile') !== 'stable-24fps-v5') {
+      if (localStorage.getItem('remote-browser-stream-profile') !== 'stable-24fps-v6') {
         this.elements.fpsInput.value = 24;
         this.elements.qualityInput.value = 54;
-        localStorage.setItem('remote-browser-stream-profile', 'stable-24fps-v5');
+        localStorage.setItem('remote-browser-stream-profile', 'stable-24fps-v6');
       } else {
         if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
       }
@@ -80,6 +81,21 @@ class RemoteBrowserClient {
       // only after a meaningful resize or desktop/mobile breakpoint change.
       if (this.isStreaming && (wasMobile !== this.isMobile || Math.abs(oldWidth - this.viewportWidth) > 80 || Math.abs(oldHeight - this.viewportHeight) > 120)) this.startStream();
     }, 250); });
+  }
+  setupOutputSurface() {
+    const updateRect = (rect) => {
+      const width = Math.max(0, rect?.width || 0), height = Math.max(0, rect?.height || 0);
+      if (this.outputSurfaceRect?.width === width && this.outputSurfaceRect?.height === height) return;
+      this.outputSurfaceRect = { width, height }; this.outputSurfaceDirty = true;
+      if (this.latestFrame && !this.decodeInFlight && !this.renderScheduled) this.scheduleLatestFrame();
+    };
+    if (typeof ResizeObserver === 'function') {
+      this.outputSurfaceObserver = new ResizeObserver((entries) => updateRect(entries[0]?.contentRect));
+      this.outputSurfaceObserver.observe(this.elements.stream);
+    } else {
+      updateRect(this.elements.stream.getBoundingClientRect());
+      window.addEventListener('resize', () => updateRect(this.elements.stream.getBoundingClientRect()));
+    }
   }
   setupEventListeners() {
     const e = this.elements;
@@ -416,14 +432,23 @@ class RemoteBrowserClient {
     const buffered = sb.buffered;
     if (buffered.length) {
       const start = buffered.start(0), end = buffered.end(buffered.length - 1);
+      // Prime a short, fixed jitter cushion before normal live playback. It is
+      // long enough to cover scheduling/network wobble but short enough that
+      // audio remains aligned with the video stream.
+      if (!this.audioPrimed) {
+        if (end - start < 0.14) { this.pumpAudioQueue(); return; }
+        this.audioPrimed = true;
+        if (player.currentTime < start || player.currentTime > end) player.currentTime = Math.max(start, end - 0.14);
+        this.log('audio jitter buffer primed', `${Math.round((end - start) * 1000)}ms`);
+      }
       // Evict played audio aggressively: 10s retention (was 30s), 3s keepback (was 10s).
       if (player.currentTime - start > 10) { try { sb.remove(start, player.currentTime - 3); return; } catch { /* fall through */ } }
       // Prefer continuous playback. Only seek when latency is clearly broken;
       // minor drift is corrected gently so words do not skip or stutter.
       const lag = end - player.currentTime;
-      if (lag > 1.2) { player.currentTime = Math.max(start, end - 0.25); player.playbackRate = 1; }
-      else if (lag > 0.5) player.playbackRate = 1.05;
-      else if (player.playbackRate !== 1 && lag < 0.3) player.playbackRate = 1;
+      if (lag > 1) { player.currentTime = Math.max(start, end - 0.2); player.playbackRate = 1; }
+      else if (lag > 0.45) player.playbackRate = 1.04;
+      else if (player.playbackRate !== 1 && lag < 0.25) player.playbackRate = 1;
       if (player.paused && this.audioEnabled) player.play().catch(() => {});
     }
     this.pumpAudioQueue();
@@ -440,7 +465,7 @@ class RemoteBrowserClient {
     }, 150);
   }
   teardownAudio(resetGeneration = true) {
-    this.audioQueue = []; this.audioQueueBytes = 0; this.sourceBuffer = null;
+    this.audioQueue = []; this.audioQueueBytes = 0; this.sourceBuffer = null; this.audioPrimed = false;
     clearTimeout(this.audioStartTimeout);
     const player = this.elements.audioPlayer;
     player.pause(); player.removeAttribute('src'); player.load();
@@ -480,8 +505,9 @@ class RemoteBrowserClient {
   }
   resizeOutputSurface() {
     if (!this.ensureContext()) return false;
-    const canvas = this.elements.stream, rect = canvas.getBoundingClientRect();
-    if (rect.width < 1 || rect.height < 1) return false;
+    const canvas = this.elements.stream, rect = this.outputSurfaceRect;
+    if (!rect || rect.width < 1 || rect.height < 1) return false;
+    if (!this.outputSurfaceDirty) return true;
     // Render the upscaled result at the client display density instead of
     // relying on a second, lower-quality CSS stretch of the small source frame.
     // The cap keeps the local surface light enough for mid-range phones.
@@ -494,12 +520,13 @@ class RemoteBrowserClient {
     const scale = Math.min(1, Math.sqrt(pixelBudget / (width * height)));
     width = Math.max(1, Math.round(width * scale));
     height = Math.max(1, Math.round(height * scale));
-    if (canvas.width === width && canvas.height === height) return true;
+    if (canvas.width === width && canvas.height === height) { this.outputSurfaceDirty = false; return true; }
     canvas.width = width; canvas.height = height;
     // Resizing a canvas resets its drawing state.
     this.streamContext.imageSmoothingEnabled = true;
     this.streamContext.imageSmoothingQuality = 'high';
     this.streamContext.globalCompositeOperation = 'copy';
+    this.outputSurfaceDirty = false;
     return true;
   }
   async decodeFrame(frame) {
@@ -615,6 +642,8 @@ class RemoteBrowserClient {
   cleanup() {
     this.cleanupFrames();
     this.teardownAudio();
+    this.outputSurfaceObserver?.disconnect();
+    this.outputSurfaceObserver = null;
     if (this.ws) {
       this.ws.close();
       this.ws = null;
