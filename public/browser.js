@@ -53,10 +53,10 @@ class RemoteBrowserClient {
       const preferences = JSON.parse(localStorage.getItem('remote-browser-preferences') || '{}');
       // Quality is now a ceiling the server adapts under, so the stored profile
       // from the old fixed-quality build has to be discarded.
-      if (localStorage.getItem('remote-browser-stream-profile') !== 'stable-24fps-v6') {
+      if (localStorage.getItem('remote-browser-stream-profile') !== 'stable-24fps-v7') {
         this.elements.fpsInput.value = 24;
-        this.elements.qualityInput.value = 54;
-        localStorage.setItem('remote-browser-stream-profile', 'stable-24fps-v6');
+        this.elements.qualityInput.value = 60;
+        localStorage.setItem('remote-browser-stream-profile', 'stable-24fps-v7');
       } else {
         if (preferences.quality) this.elements.qualityInput.value = preferences.quality;
       }
@@ -68,7 +68,7 @@ class RemoteBrowserClient {
     localStorage.setItem('remote-browser-preferences', JSON.stringify({ fps: this.fps(), quality: this.quality(), url: this.elements.urlInput.value }));
   }
   fps() { this.elements.fpsInput.value = 24; return 24; }
-  quality() { return this.clampInput(this.elements.qualityInput, 28, 78, 54); }
+  quality() { return this.clampInput(this.elements.qualityInput, 34, 82, 60); }
   clampInput(input, min, max, fallback) {
     const value = Number.parseInt(input.value, 10); input.value = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback; return Number(input.value);
   }

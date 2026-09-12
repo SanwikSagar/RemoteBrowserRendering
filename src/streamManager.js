@@ -4,7 +4,9 @@ import { spawn } from 'child_process';
 const MAX_WIDTH = 1920, MAX_HEIGHT = 1080, MAX_BUFFERED_BYTES = 96 * 1024, START_TIMEOUT_MS = 45_000, STREAM_FPS = 24;
 // Half a vCPU can encode roughly this many pixels per frame at the target rate.
 // Capture is scaled to fit the budget, then quality adapts around it.
-const PIXEL_BUDGET = 460_000, MIN_QUALITY = 28, MAX_QUALITY = 78, DEFAULT_QUALITY = 54, TUNE_INTERVAL_MS = 1_000;
+// A 540p-class source stays legible after client-side GPU upscaling while
+// leaving the tuner room to protect responsiveness on a small instance.
+const PIXEL_BUDGET = 520_000, MIN_QUALITY = 34, MAX_QUALITY = 82, DEFAULT_QUALITY = 60, TUNE_INTERVAL_MS = 1_000;
 // Capture pacing is fixed at the advertised rate. Under load we shed pixels and
 // JPEG detail instead of quietly turning a 24fps stream into a 12fps stream.
 const MIN_FRAME_INTERVAL = Math.floor(1000 / STREAM_FPS), MIN_SCALE = 0.4;
