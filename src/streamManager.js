@@ -350,7 +350,9 @@ export class StreamManager {
       '-hide_banner', '-nostdin', '-loglevel', DEBUG ? 'warning' : 'error',
       '-probesize', '32', '-analyzeduration', '0',
       '-fflags', '+nobuffer+flush_packets', '-flags', 'low_delay',
-      '-thread_queue_size', '512',
+      // A huge capture queue turns a short network stall into seconds of stale
+      // audio. Keep just enough room for normal scheduler jitter.
+      '-thread_queue_size', '32',
       // 1920 bytes = 20ms of 48kHz mono s16, matching one Opus frame exactly.
       '-f', 'pulse', '-fragment_size', '1920', '-i', AUDIO_SOURCE,
       '-ac', '1', '-ar', '48000', '-vn',
@@ -365,21 +367,25 @@ export class StreamManager {
     try { proc = spawn(FFMPEG_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (error) { this.failAudio(session, `Audio capture could not start: ${error.message}`); return; }
     session.audioProcess = proc;
+    const generation = (session.audioGeneration = (session.audioGeneration || 0) + 1);
     let initSent = false, stderrTail = '';
     
     proc.stdout.on('data', (chunk) => {
       if (session.ws?.readyState !== session.ws?.OPEN) return;
-      // Drop audio when the WebSocket is congested to avoid starving video frames.
-      if (session.ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
+      // WebM is a continuous byte stream: dropping one arbitrary stdout chunk
+      // corrupts every later cluster. Audio is therefore prioritized; the video
+      // capture path observes bufferedAmount and yields frames first.
       if (!initSent) {
         initSent = true;
-        this.sendJson(session, { type: 'audioInit', mimeType: AUDIO_MIME_TYPE });
+        this.sendJson(session, { type: 'audioInit', mimeType: AUDIO_MIME_TYPE, generation });
       }
-      // Format byte 3 marks an audio chunk; the video header layout doesn't apply.
-      const packet = Buffer.allocUnsafe(9 + chunk.length);
+      // Format byte 3 + timestamp + generation distinguishes a fresh muxer
+      // stream after recovery from old bytes still draining through the socket.
+      const packet = Buffer.allocUnsafe(13 + chunk.length);
       packet.writeUInt8(3, 0);
       packet.writeDoubleBE(Date.now(), 1);
-      chunk.copy(packet, 9);
+      packet.writeUInt32BE(generation, 9);
+      chunk.copy(packet, 13);
       session.ws.send(packet, { binary: true, compress: false });
     });
     proc.stderr.on('data', (data) => {

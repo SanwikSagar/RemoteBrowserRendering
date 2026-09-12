@@ -15,7 +15,7 @@ class RemoteBrowserClient {
     this.streamVersion = 0;
     this.droppedFrames = 0;
     // Audio streaming: an MSE-backed <audio> element fed by Opus/WebM chunks
-    this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = [];
+    this.audioEnabled = false; this.mediaSource = null; this.mediaSourceUrl = null; this.sourceBuffer = null; this.audioQueue = []; this.audioQueueBytes = 0; this.audioGeneration = null; this.minimumAudioGeneration = 0; this.audioRecovering = false;
     this.tabs = []; this.activeTabId = null;
     this.isMobile = this.detectMobile(); this.viewportWidth = 1280; this.viewportHeight = 720; this.updateViewportSize();
     this.elements = Object.fromEntries(['urlInput','fpsInput','qualityInput','backBtn','forwardBtn','refreshBtn','homeBtn','settingsBtn','settingsMenu','startStreamOption','stopStreamOption','stream','viewport','placeholder','loadingSpinner','loadingText','loadingSubtext','connectionOverlay','connectionTitle','connectionSubtitle','statusDot','statusText','currentUrl','fpsDisplay','frameCount','latency','loadingBar','windowTitle','suggestions','browserWindow','fullscreenBtn','fullscreenExitBtn','tabsBar','newTabBtn','audioBtn','audioIcon','audioPlayer'].map((id) => [id, document.getElementById(id)]));
@@ -305,7 +305,7 @@ class RemoteBrowserClient {
       if (!ok && this.audioEnabled) { this.audioEnabled = false; this.updateAudioIcon(); this.teardownAudio(); }
       if (!ok) this.log('audio unavailable', data.audio?.reason || '');
     }
-    if (data.type === 'audioInit') { if (this.audioEnabled) this.setupAudio(data.mimeType); }
+    if (data.type === 'audioInit' && this.audioEnabled) this.handleAudioInit(data);
     if (data.type === 'audioError') {
       this.audioEnabled = false; this.updateAudioIcon(); this.teardownAudio();
       this.showNotification(data.message || 'Audio is unavailable.', 'error');
@@ -333,6 +333,7 @@ class RemoteBrowserClient {
       return;
     }
     this.audioEnabled = true;
+    this.audioGeneration = null; this.minimumAudioGeneration = 0;
     this.updateAudioIcon();
     // Must happen inside the click handler: autoplay policy only honours play()
     // while a user gesture is active, and the server's first chunk arrives later.
@@ -353,24 +354,46 @@ class RemoteBrowserClient {
       this.sourceBuffer = this.mediaSource.addSourceBuffer(mimeType);
       this.sourceBuffer.mode = 'sequence';
       this.sourceBuffer.addEventListener('updateend', () => this.onAudioUpdateEnd());
-      this.sourceBuffer.addEventListener('error', () => { if (this.debug) this.log('audio SourceBuffer error'); });
+      this.sourceBuffer.addEventListener('error', () => {
+        if (this.debug) this.log('audio SourceBuffer error');
+        this.recoverAudio();
+      });
       this.pumpAudioQueue();
     }, { once: true });
     player.play().catch((error) => { if (this.debug) this.log('audio play blocked', error.message); });
   }
+  handleAudioInit(data) {
+    const generation = Number(data.generation);
+    if (!Number.isSafeInteger(generation) || generation < this.minimumAudioGeneration) return;
+    if (this.audioGeneration !== null && generation !== this.audioGeneration) this.teardownAudio(false);
+    this.audioGeneration = generation; this.minimumAudioGeneration = generation;
+    this.audioRecovering = false;
+    this.setupAudio(data.mimeType || AUDIO_MIME_TYPE);
+  }
   receiveAudioChunk(buffer) {
-    if (!this.audioEnabled) return;
+    if (!this.audioEnabled || buffer.byteLength < 14) return;
+    const generation = new DataView(buffer).getUint32(9);
+    if (generation !== this.audioGeneration) return;
     if (!this.mediaSource) this.setupAudio(AUDIO_MIME_TYPE);
-    this.audioQueue.push(buffer.slice(9));
-    // Bound the queue: 40 chunks × ~20ms = 800ms max. Previous 120-chunk limit
-    // allowed 2.4s of buffered audio causing massive perceived lag.
-    if (this.audioQueue.length > 40) { this.audioQueue.splice(0, this.audioQueue.length - 40); if (this.debug) this.log('audio queue overflow'); }
+    const chunk = buffer.slice(13);
+    this.audioQueue.push(chunk); this.audioQueueBytes += chunk.byteLength;
+    // Never discard a fragment from a continuous WebM stream. If local MSE is
+    // genuinely stalled, reset both ends onto a new, independently initialized
+    // muxer stream instead of corrupting the current one.
+    if (this.audioQueueBytes > 256 * 1024) return this.recoverAudio();
     this.pumpAudioQueue();
   }
   pumpAudioQueue() {
     if (!this.sourceBuffer || this.sourceBuffer.updating || !this.audioQueue.length) return;
-    try { this.sourceBuffer.appendBuffer(this.audioQueue.shift()); }
-    catch (error) { if (this.debug) this.log('audio append failed', error.message); }
+    const chunk = this.audioQueue[0];
+    try {
+      this.sourceBuffer.appendBuffer(chunk);
+      this.audioQueue.shift(); this.audioQueueBytes -= chunk.byteLength;
+    } catch (error) {
+      if (this.debug) this.log('audio append deferred', error.message);
+      if (error.name === 'QuotaExceededError') return this.recoverAudio();
+      setTimeout(() => this.pumpAudioQueue(), 50);
+    }
   }
   onAudioUpdateEnd() {
     const sb = this.sourceBuffer, player = this.elements.audioPlayer;
@@ -380,22 +403,33 @@ class RemoteBrowserClient {
       const start = buffered.start(0), end = buffered.end(buffered.length - 1);
       // Evict played audio aggressively: 10s retention (was 30s), 3s keepback (was 10s).
       if (player.currentTime - start > 10) { try { sb.remove(start, player.currentTime - 3); return; } catch { /* fall through */ } }
-      // Aggressive live-edge tracking: hard seek at >400ms (was 700ms).
-      // Speed up at >200ms (was 350ms) with 1.12x rate (was 1.08x).
+      // Prefer continuous playback. Only seek when latency is clearly broken;
+      // minor drift is corrected gently so words do not skip or stutter.
       const lag = end - player.currentTime;
-      if (lag > 0.4) { player.currentTime = end - 0.1; player.playbackRate = 1; }
-      else if (lag > 0.2) player.playbackRate = 1.12;
-      else if (player.playbackRate !== 1 && lag < 0.12) player.playbackRate = 1;
+      if (lag > 1.2) { player.currentTime = Math.max(start, end - 0.25); player.playbackRate = 1; }
+      else if (lag > 0.5) player.playbackRate = 1.05;
+      else if (player.playbackRate !== 1 && lag < 0.3) player.playbackRate = 1;
       if (player.paused && this.audioEnabled) player.play().catch(() => {});
     }
     this.pumpAudioQueue();
   }
-  teardownAudio() {
-    this.audioQueue = []; this.sourceBuffer = null;
+  recoverAudio() {
+    if (this.audioRecovering || !this.audioEnabled) return;
+    this.audioRecovering = true;
+    this.minimumAudioGeneration = (this.audioGeneration || 0) + 1;
+    this.teardownAudio(false); this.sendAudioCommand(false);
+    setTimeout(() => {
+      if (!this.audioEnabled) return;
+      this.sendAudioCommand(true);
+    }, 150);
+  }
+  teardownAudio(resetGeneration = true) {
+    this.audioQueue = []; this.audioQueueBytes = 0; this.sourceBuffer = null;
     const player = this.elements.audioPlayer;
     player.pause(); player.removeAttribute('src'); player.load();
     if (this.mediaSourceUrl) { URL.revokeObjectURL(this.mediaSourceUrl); this.mediaSourceUrl = null; }
     this.mediaSource = null;
+    if (resetGeneration) { this.audioGeneration = null; this.minimumAudioGeneration = 0; }
   }
   receiveFrame(buffer) {
     if (buffer.byteLength < 18) return;

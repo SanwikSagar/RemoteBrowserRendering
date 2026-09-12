@@ -77,7 +77,7 @@ quality up or down every 2 seconds, within `[MIN_QUALITY, MAX_QUALITY]`.
    capturable PCM stream.
 2. `ffmpeg -f pulse -i virtual_speaker.monitor ... -c:a libopus -f webm ...`
    emits small WebM/Opus clusters on `stdout`.
-3. Each cluster is framed as `[u8 format=3][f64 timestamp][WebM bytes]` and
+3. Each cluster is framed as `[u8 format=3][f64 timestamp][u32 generation][WebM bytes]` and
    sent as a binary WebSocket message. The client keeps a `MediaSource` +
    `SourceBuffer` and appends clusters in order, gated on `updateend`, with a
    bounded queue so a stalled buffer can't accumulate memory.
@@ -111,14 +111,14 @@ are coalesced server-side and flushed once per tick as a single wheel event.
 { "type": "progress", "progress": 50, "message": "…", "subtext": "…" }
 { "type": "pageInfo", "sessionId": "…", "tabId": "…", "url": "…", "title": "…" }
 { "type": "tabState", "activeTabId": "…", "tabs": [{ "id": "…", "title": "…", "url": "…" }] }
-{ "type": "audioInit", "mimeType": "audio/webm; codecs=\"opus\"" }
+{ "type": "audioInit", "mimeType": "audio/webm; codecs=\"opus\"", "generation": 1 }
 { "type": "stopped" }
 { "type": "error", "message": "…" }
 ```
 
 ### Server → Client (binary)
 Video: `[u8 format=2][u32 BE frameNumber][f64 BE timestamp][u16 BE width][u16 BE height][JPEG bytes]`
-Audio: `[u8 format=3][f64 BE timestamp][WebM/Opus bytes]`
+Audio: `[u8 format=3][f64 BE timestamp][u32 BE generation][WebM/Opus bytes]`
 
 ## Deployment
 
